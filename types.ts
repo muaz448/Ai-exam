@@ -1,8 +1,14 @@
 
+export enum QuestionType {
+  MULTIPLE_CHOICE = 'multiple_choice',
+  FILL_IN_THE_BLANK = 'fill_in_the_blank'
+}
+
 export interface Question {
   id: string;
   text: string;
-  options: {
+  type: QuestionType;
+  options?: {
     label: string;
     text: string;
   }[];
@@ -30,6 +36,7 @@ export interface TestResult {
   correctCount: number;
   timestamp: number;
   userAnswers: Record<string, string>; // Maps questionId to label
+  questionsSnapshot: Question[]; // Snapshot of questions at time of test
   aiFeedback?: string;
 }
 

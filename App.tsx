@@ -1,50 +1,160 @@
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Question, Theme, ViewState, User, Test, TestResult } from './types';
-import { generateQuestionsWithGemini, getAIStudyFeedback } from './services/geminiService';
+import { motion, AnimatePresence } from 'framer-motion';
+import { 
+  BookOpen, 
+  GraduationCap, 
+  Plus, 
+  FileText, 
+  Clock, 
+  ChevronRight, 
+  LogOut, 
+  User as UserIcon,
+  CheckCircle2,
+  XCircle,
+  BarChart3,
+  ArrowLeft,
+  Upload,
+  Loader2,
+  Trash2,
+  Eye,
+  Download,
+  BrainCircuit,
+  AlertTriangle,
+  Menu,
+  X
+} from 'lucide-react';
+import { Question, Theme, ViewState, User, Test, TestResult, QuestionType } from './types';
+import { generateQuestionsWithGemini, getAIStudyFeedback, expandQuestionsWithGemini } from './services/geminiService';
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
 
 const App: React.FC = () => {
-  // Navigation & Auth
   const [view, setView] = useState<ViewState>('home');
   const [role, setRole] = useState<'teacher' | 'student' | null>(null);
   const [user, setUser] = useState<User | null>(null);
-  const [theme, setTheme] = useState<Theme>(Theme.LIGHT);
-  
-  // Data Persistence
   const [tests, setTests] = useState<Test[]>([]);
   const [results, setResults] = useState<TestResult[]>([]);
-  
-  // Workflow State
   const [activeTest, setActiveTest] = useState<Test | null>(null);
   const [activeResult, setActiveResult] = useState<TestResult | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [timeLeft, setTimeLeft] = useState(0);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editTestId, setEditTestId] = useState<string | null>(null);
-
+  const [showEditConfirm, setShowEditConfirm] = useState(false);
+  const [pendingSaveData, setPendingSaveData] = useState<any>(null);
+  const [isPreviewMode, setIsPreviewMode] = useState(false);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [extractedText, setExtractedText] = useState<string>('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const timerRef = useRef<number | null>(null);
 
-  // Initialize Data
+  const [creationMode, setCreationMode] = useState<'ai' | 'manual'>('ai');
+  const [manualQuestions, setManualQuestions] = useState<Question[]>([
+    {
+      id: `q-manual-${Date.now()}`,
+      text: '',
+      type: QuestionType.MULTIPLE_CHOICE,
+      options: [
+        { label: 'A', text: '' },
+        { label: 'B', text: '' },
+        { label: 'C', text: '' },
+        { label: 'D', text: '' },
+      ],
+      correctAnswer: 'A'
+    }
+  ]);
+  const [isExpanding, setIsExpanding] = useState(false);
+
+  const addManualQuestion = () => {
+    setManualQuestions([...manualQuestions, {
+      id: `q-manual-${Date.now()}`,
+      text: '',
+      type: QuestionType.MULTIPLE_CHOICE,
+      options: [
+        { label: 'A', text: '' },
+        { label: 'B', text: '' },
+        { label: 'C', text: '' },
+        { label: 'D', text: '' },
+      ],
+      correctAnswer: 'A'
+    }]);
+  };
+
+  const removeManualQuestion = (id: string) => {
+    if (manualQuestions.length > 1) {
+      setManualQuestions(manualQuestions.filter(q => q.id !== id));
+    }
+  };
+
+  const updateManualQuestion = (id: string, updates: Partial<Question>) => {
+    setManualQuestions(manualQuestions.map(q => q.id === id ? { ...q, ...updates } : q));
+  };
+
+  const handleExpandQuestions = async () => {
+    if (manualQuestions.some(q => !q.text.trim())) {
+      setError('Please fill in existing questions before expanding.');
+      return;
+    }
+    setIsExpanding(true);
+    setError(null);
+    try {
+      const expanded = await expandQuestionsWithGemini(manualQuestions, 5);
+      setManualQuestions([...manualQuestions, ...expanded]);
+    } catch (err) {
+      setError('AI Expansion failed. Try again.');
+    } finally {
+      setIsExpanding(false);
+    }
+  };
+
+  const handleSaveManualTest = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+    const title = formData.get('title') as string;
+    const time = Number(formData.get('timer'));
+
+    if (manualQuestions.some(q => !q.text.trim() || (q.type === QuestionType.MULTIPLE_CHOICE && q.options?.some(o => !o.text.trim())))) {
+      setError('Please fill in all questions and options.');
+      return;
+    }
+
+    const newTest: Test = {
+      id: editTestId || `t-${Date.now()}`,
+      title,
+      questions: manualQuestions,
+      createdAt: editTestId ? (tests.find(t => t.id === editTestId)?.createdAt || Date.now()) : Date.now(),
+      lastModified: Date.now(),
+      timerMinutes: time,
+      creatorId: user!.id
+    };
+
+    if (editTestId) {
+      setPendingSaveData(newTest);
+      setShowEditConfirm(true);
+    } else {
+      performSave(newTest);
+    }
+  };
+
   useEffect(() => {
     const savedTests = localStorage.getItem('qs_tests');
     const savedResults = localStorage.getItem('qs_results');
-    const savedTheme = localStorage.getItem('theme') as Theme;
-
     if (savedTests) setTests(JSON.parse(savedTests));
     if (savedResults) setResults(JSON.parse(savedResults));
-    if (savedTheme) {
-      setTheme(savedTheme);
-      document.documentElement.classList.toggle('dark', savedTheme === Theme.DARK);
-    }
+    document.documentElement.classList.add('dark');
   }, []);
 
   useEffect(() => localStorage.setItem('qs_tests', JSON.stringify(tests)), [tests]);
   useEffect(() => localStorage.setItem('qs_results', JSON.stringify(results)), [results]);
 
-  // Timer logic
   useEffect(() => {
-    if (view === 'test-taking' && timeLeft > 0) {
+    if (view === 'test-taking' && !isPreviewMode && timeLeft > 0) {
       timerRef.current = window.setInterval(() => {
         setTimeLeft(prev => {
           if (prev <= 1) { handleTestSubmit(); return 0; }
@@ -55,28 +165,79 @@ const App: React.FC = () => {
       clearInterval(timerRef.current);
     }
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [view, timeLeft]);
+  }, [view, timeLeft, isPreviewMode]);
 
-  // --- Helpers ---
-
-  const groupedResults = useMemo(() => {
-    const groups: Record<string, TestResult[]> = {};
-    results.forEach(res => {
-      const date = new Date(res.timestamp).toLocaleDateString(undefined, { dateStyle: 'long' });
-      if (!groups[date]) groups[date] = [];
-      groups[date].push(res);
-    });
-    return Object.entries(groups).sort((a, b) => new Date(b[0]).getTime() - new Date(a[0]).getTime());
-  }, [results]);
-
-  const toggleTheme = () => {
-    const newTheme = theme === Theme.LIGHT ? Theme.DARK : Theme.LIGHT;
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    document.documentElement.classList.toggle('dark', newTheme === Theme.DARK);
+  const extractTextFromPDF = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    // @ts-ignore
+    const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = '';
+    for (let i = 1; i <= Math.min(pdf.numPages, 30); i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      // @ts-ignore
+      fullText += textContent.items.map((item: any) => item.str).join(' ') + '\n';
+    }
+    return fullText;
   };
 
-  // --- Handlers ---
+  const extractTextFromDocx = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    // @ts-ignore
+    const result = await window.mammoth.extractRawText({ arrayBuffer });
+    return result.value;
+  };
+
+  const extractTextFromPptx = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    // @ts-ignore
+    const zip = await window.JSZip.loadAsync(arrayBuffer);
+    let fullText = '';
+    const slideEntries = Object.keys(zip.files).filter(name => name.startsWith('ppt/slides/slide') && name.endsWith('.xml'));
+    for (const entryName of slideEntries) {
+      const content = await zip.files[entryName].async('text');
+      const parser = new DOMParser();
+      const xmlDoc = parser.parseFromString(content, 'text/xml');
+      const textNodes = xmlDoc.getElementsByTagName('a:t');
+      for (let i = 0; i < textNodes.length; i++) {
+        fullText += (textNodes[i].textContent || '') + ' ';
+      }
+      fullText += '\n';
+    }
+    return fullText;
+  };
+
+  const extractTextFromGeneric = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target?.result as string);
+      reader.onerror = reject;
+      reader.readAsText(file);
+    });
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadedFile(file);
+    setIsExtracting(true);
+    setError(null);
+    try {
+      let text = '';
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      if (ext === 'pdf') text = await extractTextFromPDF(file);
+      else if (ext === 'docx') text = await extractTextFromDocx(file);
+      else if (ext === 'pptx') text = await extractTextFromPptx(file);
+      else if (['txt', 'md', 'csv', 'json'].includes(ext || '')) text = await extractTextFromGeneric(file);
+      else text = await extractTextFromGeneric(file);
+      setExtractedText(text);
+    } catch (err) {
+      setError("Failed to process document. Please try a different format.");
+      setUploadedFile(null);
+    } finally {
+      setIsExtracting(false);
+    }
+  };
 
   const handleLogin = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -84,459 +245,990 @@ const App: React.FC = () => {
     const name = formData.get('name') as string;
     const id = formData.get('id') as string;
     const password = formData.get('password') as string;
-
     if (role === 'teacher' && password !== '1996') {
       setError('Incorrect Teacher Password.');
       return;
     }
-
     setUser({ id, name, role: role! });
     setError(null);
     setView(role === 'teacher' ? 'teacher-dash' : 'student-dash');
   };
 
+  const performSave = (newTest: Test) => {
+    if (editTestId) {
+      setTests(prev => prev.map(t => t.id === editTestId ? newTest : t));
+    } else {
+      setTests([newTest, ...tests]);
+    }
+    setEditTestId(null);
+    setShowEditConfirm(false);
+    setPendingSaveData(null);
+    setUploadedFile(null);
+    setExtractedText('');
+    setManualQuestions([{
+      id: `q-manual-${Date.now()}`,
+      text: '',
+      type: QuestionType.MULTIPLE_CHOICE,
+      options: [
+        { label: 'A', text: '' },
+        { label: 'B', text: '' },
+        { label: 'C', text: '' },
+        { label: 'D', text: '' },
+      ],
+      correctAnswer: 'A'
+    }]);
+    setView('teacher-dash');
+  };
+
   const handleSaveTest = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const text = formData.get('text') as string;
-    const count = Number(formData.get('count'));
+    const pastedText = formData.get('text') as string;
+    const mcCount = Number(formData.get('mcCount') || 0);
+    const fibCount = Number(formData.get('fibCount') || 0);
     const time = Number(formData.get('timer'));
     const title = formData.get('title') as string;
+    const choiceCount = Number(formData.get('choiceCount') || 4);
+    const sourceText = extractedText || pastedText;
+
+    if (!sourceText || sourceText.trim().length < 50) {
+      setError('Please provide more content material.');
+      return;
+    }
+
+    if (mcCount + fibCount === 0) {
+      setError('Please specify at least one question to generate.');
+      return;
+    }
 
     setIsGenerating(true);
     setError(null);
-
     try {
+      const qs = await generateQuestionsWithGemini(sourceText, mcCount, fibCount, choiceCount);
+      const newTest: Test = {
+        id: editTestId || `t-${Date.now()}`,
+        title,
+        questions: qs,
+        createdAt: editTestId ? (tests.find(t => t.id === editTestId)?.createdAt || Date.now()) : Date.now(),
+        lastModified: Date.now(),
+        timerMinutes: time,
+        creatorId: user!.id
+      };
+
       if (editTestId) {
-        // Edit existing
-        setTests(prev => prev.map(t => t.id === editTestId ? { 
-          ...t, 
-          title, 
-          timerMinutes: time, 
-          lastModified: Date.now() 
-        } : t));
-        setEditTestId(null);
-        setView('teacher-dash');
+        setPendingSaveData(newTest);
+        setShowEditConfirm(true);
       } else {
-        // Generate new
-        const qs = await generateQuestionsWithGemini(text, count);
-        const newTest: Test = {
-          id: `t-${Date.now()}`,
-          title,
-          questions: qs,
-          createdAt: Date.now(),
-          timerMinutes: time,
-          creatorId: user!.id
-        };
-        setTests([newTest, ...tests]);
-        setView('teacher-dash');
+        performSave(newTest);
       }
     } catch (err) {
-      setError('Operation failed.');
+      setError('Generation failed. Try again.');
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const deleteTest = (id: string) => {
-    if (confirm('Are you sure you want to delete this test? History will remain.')) {
-      setTests(tests.filter(t => t.id !== id));
-    }
-  };
-
-  const startTest = (test: Test) => {
+  const startTest = (test: Test, preview: boolean = false) => {
     setActiveTest(test);
     setAnswers({});
+    setIsPreviewMode(preview);
     setTimeLeft(test.timerMinutes * 60);
     setView('test-taking');
   };
 
   const handleTestSubmit = async () => {
-    if (!activeTest) return;
-
+    if (!activeTest || isPreviewMode) { setView('teacher-dash'); return; }
     let correct = 0;
-    activeTest.questions.forEach(q => {
-      if (answers[q.id] === q.correctAnswer) correct++;
-    });
-
+    activeTest.questions.forEach(q => { if (answers[q.id] === q.correctAnswer) correct++; });
     const score = Math.round((correct / activeTest.questions.length) * 100);
     const feedback = await getAIStudyFeedback(score, activeTest.questions.filter(q => answers[q.id] !== q.correctAnswer).map(q => q.text).slice(0,3));
-
     const result: TestResult = {
-      id: `r-${Date.now()}`,
-      testId: activeTest.id,
-      testTitle: activeTest.title,
-      studentId: user!.id,
-      studentName: user!.name,
-      score,
-      totalQuestions: activeTest.questions.length,
-      correctCount: correct,
-      timestamp: Date.now(),
-      userAnswers: { ...answers },
-      aiFeedback: feedback
+      id: `r-${Date.now()}`, testId: activeTest.id, testTitle: activeTest.title,
+      studentId: user!.id, studentName: user!.name, score, totalQuestions: activeTest.questions.length,
+      correctCount: correct, timestamp: Date.now(), userAnswers: { ...answers },
+      questionsSnapshot: [...activeTest.questions], aiFeedback: feedback
     };
-
     setResults([result, ...results]);
     setActiveResult(result);
     setView('result-view');
   };
 
   const getScoreColor = (score: number) => {
-    if (score >= 80) return 'text-green-500 bg-green-50 dark:bg-green-900/20';
-    if (score >= 50) return 'text-yellow-600 bg-yellow-50 dark:bg-yellow-900/20';
-    return 'text-red-500 bg-red-50 dark:bg-red-900/20';
+    if (score >= 80) return 'text-emerald-500';
+    if (score >= 50) return 'text-amber-500';
+    return 'text-rose-500';
   };
 
-  // --- Components ---
-
-  const QuestionLayout = ({ question, index, selected, onSelect, isReview = false, correctAnswer = '' }: any) => (
-    <div className="q-card p-5 mb-4 border-none shadow-sm overflow-hidden">
-      <div className="flex gap-4">
-        <span className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/40 text-blue-600 flex items-center justify-center font-bold text-sm">
-          {index + 1}
-        </span>
-        <div className="flex-grow">
-          <p className="text-lg font-medium mb-4 leading-snug">{question.text}</p>
-          <div className="grid sm:grid-cols-2 gap-3">
-            {question.options.map((opt: any) => {
-              const isUserChoice = selected === opt.label;
-              const isCorrect = opt.label === correctAnswer;
-              
-              let style = "border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800";
-              if (isReview) {
-                if (isCorrect) style = "bg-green-100 border-green-500 dark:bg-green-900/30 text-green-700 dark:text-green-300";
-                else if (isUserChoice && !isCorrect) style = "bg-red-100 border-red-500 dark:bg-red-900/30 text-red-700 dark:text-red-300";
-              } else if (isUserChoice) {
-                style = "border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 ring-2 ring-blue-500/20";
-              }
-
-              return (
-                <button
-                  key={opt.label}
-                  disabled={isReview}
-                  onClick={() => onSelect(opt.label)}
-                  className={`flex items-start gap-3 p-3 text-left border rounded-xl transition-all duration-200 ${style}`}
-                >
-                  <span className="font-black text-xs opacity-40 mt-0.5">{opt.label}.</span>
-                  <span className="text-sm font-medium">{opt.text}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
-  const ReviewDetailModal = () => {
-    if (!activeResult) return null;
-    const test = tests.find(t => t.id === activeResult.testId) || { questions: [] };
-    
-    return (
-      <div className="animate-in fade-in zoom-in-95 max-w-4xl mx-auto py-6">
-        <button onClick={() => setView(user?.role === 'teacher' ? 'teacher-dash' : 'student-dash')} className="mb-4 text-blue-500 font-bold flex items-center gap-1">
-          ← Back to Dashboard
-        </button>
-        <div className="q-card p-6 mb-6">
-          <div className="flex justify-between items-end">
-            <div>
-              <h2 className="text-2xl font-bold">{activeResult.studentName}'s Performance</h2>
-              <p className="opacity-60 text-sm">{activeResult.testTitle} • {new Date(activeResult.timestamp).toLocaleString()}</p>
-            </div>
-            <div className={`px-4 py-2 rounded-xl font-black text-2xl ${getScoreColor(activeResult.score)}`}>
-              {activeResult.score}%
-            </div>
-          </div>
-        </div>
-        <div className="space-y-4">
-          {test.questions.map((q, i) => (
-            <QuestionLayout 
-              key={q.id} 
-              question={q} 
-              index={i} 
-              selected={activeResult.userAnswers[q.id]} 
-              isReview={true} 
-              correctAnswer={q.correctAnswer} 
-            />
-          ))}
-        </div>
-      </div>
-    );
+  const formatTime = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
-  const TeacherDash = () => (
-    <div className="space-y-10 animate-in fade-in">
-      <div className="flex justify-between items-center">
-        <div>
-          <h2 className="text-3xl font-black tracking-tight">Management Console</h2>
-          <p className="opacity-50 text-sm">Create, edit and track exams</p>
-        </div>
-        <button onClick={() => { setEditTestId(null); setView('test-creator'); }} className="px-6 py-3 bg-[var(--primary)] text-white rounded-2xl font-bold shadow-lg shadow-blue-500/20 hover:scale-105 transition-transform">+ New Test</button>
-      </div>
+  const pageVariants = {
+    initial: { opacity: 0, y: 10 },
+    animate: { opacity: 1, y: 0 },
+    exit: { opacity: 0, y: -10 }
+  };
 
-      <div className="grid lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-1 space-y-4">
-          <h3 className="text-xs font-black uppercase tracking-widest opacity-40">Active Exams</h3>
-          {tests.length === 0 ? <p className="opacity-30 italic text-sm py-8 border-2 border-dashed rounded-2xl text-center">Empty Repository</p> : tests.map(t => (
-            <div key={t.id} className="q-card p-5 group">
-              <div className="flex justify-between items-start mb-3">
-                <h4 className="font-bold">{t.title}</h4>
-                <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button onClick={() => { setEditTestId(t.id); setView('test-creator'); }} title="Edit" className="p-2 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-lg text-blue-500">✎</button>
-                  <button onClick={() => deleteTest(t.id)} title="Delete" className="p-2 hover:bg-red-50 dark:hover:bg-red-900/30 rounded-lg text-red-500">✕</button>
-                </div>
-              </div>
-              <div className="flex justify-between items-center text-xs">
-                <span className="opacity-50">{t.questions.length} Questions • {t.timerMinutes}m</span>
-                <button onClick={() => { setActiveTest(t); setView('test-taking'); }} className="text-blue-500 font-bold hover:underline">Preview Exam</button>
-              </div>
+  const Nav = () => (
+    <nav className="fixed top-0 left-0 right-0 z-50 bg-black/80 backdrop-blur-md border-b border-white/10">
+      <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView(user ? (user.role === 'teacher' ? 'teacher-dash' : 'student-dash') : 'home')}>
+          <div className="w-8 h-8 bg-red-600 rounded-lg flex items-center justify-center">
+            <BrainCircuit className="w-5 h-5 text-white" />
+          </div>
+          <span className="font-bold text-xl tracking-tight hidden sm:block">QuickStudy</span>
+        </div>
+
+        {user && (
+          <div className="flex items-center gap-4">
+            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-full border border-white/10">
+              <UserIcon className="w-4 h-4 text-red-500" />
+              <span className="text-sm font-medium">{user.name}</span>
+              <span className="text-[10px] uppercase tracking-wider opacity-50 px-1.5 py-0.5 bg-white/10 rounded">
+                {user.role}
+              </span>
             </div>
-          ))}
-        </div>
-
-        <div className="lg:col-span-2 space-y-6">
-          <h3 className="text-xs font-black uppercase tracking-widest opacity-40">Historical Attendee Grouping</h3>
-          <div className="space-y-8">
-            {groupedResults.length === 0 ? <p className="opacity-30 italic py-10 text-center">No student data yet.</p> : groupedResults.map(([date, items]) => (
-              <section key={date}>
-                <div className="sticky top-0 bg-[var(--bg)] py-2 z-10">
-                  <h4 className="text-sm font-bold text-blue-600 dark:text-blue-400 flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-blue-500"></span>
-                    {date}
-                    <span className="ml-auto text-[10px] bg-blue-100 dark:bg-blue-900/40 px-2 py-0.5 rounded-full">{items.length} Students</span>
-                  </h4>
-                </div>
-                <div className="mt-4 grid gap-3">
-                  {items.map(r => (
-                    <div 
-                      key={r.id} 
-                      onClick={() => { setActiveResult(r); setView('review-detail'); }}
-                      className="q-card p-4 flex items-center justify-between cursor-pointer hover:border-blue-500/30 transition-all border-l-4 border-l-blue-500"
-                    >
-                      <div className="flex items-center gap-4">
-                        <div className="w-10 h-10 rounded-xl bg-gray-100 dark:bg-gray-800 flex items-center justify-center font-black text-sm uppercase">
-                          {r.studentName.charAt(0)}
-                        </div>
-                        <div>
-                          <p className="font-bold text-sm leading-none">{r.studentName}</p>
-                          <p className="text-[10px] opacity-50 mt-1 uppercase tracking-tighter">{r.testTitle} • {new Date(r.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</p>
-                        </div>
-                      </div>
-                      <div className={`px-3 py-1 rounded-lg text-xs font-black ${getScoreColor(r.score)}`}>
-                        {r.correctCount}/{r.totalQuestions} ({r.score}%)
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            ))}
+            <button 
+              onClick={() => { setUser(null); setView('home'); }}
+              className="p-2 hover:bg-white/10 rounded-full transition-colors text-red-500"
+              title="Logout"
+            >
+              <LogOut className="w-5 h-5" />
+            </button>
           </div>
-        </div>
+        )}
       </div>
-    </div>
+    </nav>
   );
-
-  const StudentDash = () => (
-    <div className="space-y-8 animate-in fade-in">
-      <div className="bg-gradient-to-br from-indigo-600 to-blue-700 p-10 rounded-[2.5rem] text-white shadow-2xl shadow-blue-500/20">
-        <h2 className="text-4xl font-black mb-2">Hello, {user?.name.split(' ')[0]}!</h2>
-        <p className="opacity-80 font-medium">Your learning journey continues. Choose a test below to start.</p>
-      </div>
-
-      <div className="grid md:grid-cols-2 gap-10">
-        <section>
-          <h3 className="text-xs font-black uppercase tracking-widest opacity-40 mb-6">Your History</h3>
-          <div className="space-y-3">
-            {results.filter(r => r.studentId === user?.id).map(r => (
-              <div 
-                key={r.id} 
-                onClick={() => { setActiveResult(r); setView('review-detail'); }}
-                className="q-card p-5 flex justify-between items-center cursor-pointer border-l-4 border-l-green-500 hover:scale-[1.01] transition-transform"
-              >
-                <div>
-                  <h4 className="font-bold">{r.testTitle}</h4>
-                  <p className="text-[10px] opacity-50">{new Date(r.timestamp).toLocaleString()}</p>
-                </div>
-                <div className={`px-3 py-1 rounded-lg font-black ${getScoreColor(r.score)}`}>
-                  {r.score}%
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section>
-          <h3 className="text-xs font-black uppercase tracking-widest opacity-40 mb-6">Open Exams</h3>
-          <div className="grid gap-4">
-            {tests.map(t => (
-              <div key={t.id} className="q-card p-6 flex flex-col items-center text-center gap-4">
-                <div>
-                  <h4 className="text-xl font-bold">{t.title}</h4>
-                  <p className="text-sm opacity-50 mt-1">{t.questions.length} questions • {t.timerMinutes} mins</p>
-                </div>
-                <button onClick={() => startTest(t)} className="w-full py-3 bg-[var(--primary)] text-white rounded-2xl font-bold shadow-lg shadow-blue-500/20">Take Exam</button>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-
-  // --- Main Render ---
 
   return (
-    <div className="min-h-screen pb-20">
-      <nav className="max-w-6xl mx-auto p-6 flex justify-between items-center">
-        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView('home')}>
-          <div className="w-10 h-10 bg-[var(--primary)] rounded-xl flex items-center justify-center text-white font-black shadow-lg shadow-blue-500/20">Q</div>
-          <span className="font-black text-2xl tracking-tighter">QuickStudy</span>
-        </div>
-        <div className="flex items-center gap-4">
-          {user && (
-            <div className="text-right hidden sm:block mr-2">
-              <p className="text-sm font-black leading-none">{user.name}</p>
-              <p className="text-[10px] opacity-40 uppercase font-bold tracking-widest">{user.role}</p>
-            </div>
-          )}
-          <button onClick={toggleTheme} className="w-10 h-10 rounded-xl bg-[var(--card)] shadow-sm flex items-center justify-center border">
-            {theme === Theme.LIGHT ? '🌙' : '☀️'}
-          </button>
-          {user && <button onClick={() => window.location.reload()} className="text-xs font-bold opacity-40 hover:opacity-100">Logout</button>}
-        </div>
-      </nav>
-
-      <main className="max-w-6xl mx-auto px-4 mt-6">
-        {view === 'home' && (
-          <div className="flex flex-col items-center justify-center min-h-[70vh] text-center space-y-12">
-            <div className="space-y-6">
-              <h1 className="text-7xl font-black tracking-tight leading-none bg-gradient-to-b from-[var(--text)] to-[var(--text)] opacity-90 bg-clip-text text-transparent">
-                Adaptive Assessment.<br/><span className="text-blue-600">Perfect Results.</span>
+    <div className="min-h-screen bg-black text-white selection:bg-red-500/30">
+      <Nav />
+      
+      <main className="pt-24 pb-12 px-4 max-w-7xl mx-auto">
+        <AnimatePresence mode="wait">
+          {view === 'home' && (
+            <motion.div 
+              key="home"
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="flex flex-col items-center justify-center text-center py-12 md:py-24"
+            >
+              <motion.div
+                initial={{ scale: 0.8, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ duration: 0.5 }}
+                className="mb-8"
+              >
+                <div className="w-20 h-20 bg-red-600 rounded-2xl flex items-center justify-center mx-auto shadow-2xl shadow-red-600/20">
+                  <BrainCircuit className="w-12 h-12 text-white" />
+                </div>
+              </motion.div>
+              
+              <h1 className="text-5xl md:text-7xl font-black tracking-tighter mb-6">
+                STUDY <span className="text-red-600 italic">SMARTER</span>
               </h1>
-              <p className="text-lg opacity-60 max-w-lg mx-auto font-medium">
-                The world's first AI-powered LMS for rapid assessment and detailed performance tracking.
+              <p className="text-zinc-400 text-lg md:text-xl max-w-2xl mb-12 leading-relaxed">
+                Transform any document or text into professional multiple-choice tests in seconds. 
+                Powered by Gemini AI for precision learning.
               </p>
-            </div>
-            <div className="flex gap-4 w-full max-w-lg">
-              <button onClick={() => { setRole('teacher'); setView('login'); }} className="flex-1 h-16 bg-blue-600 text-white rounded-[1.25rem] font-black text-lg shadow-2xl shadow-blue-600/30 hover:scale-105 transition-all">Teacher Login</button>
-              <button onClick={() => { setRole('student'); setView('login'); }} className="flex-1 h-16 bg-[var(--card)] border-2 rounded-[1.25rem] font-black text-lg hover:scale-105 transition-all">Student Portal</button>
-            </div>
-          </div>
-        )}
 
-        {view === 'login' && (
-          <div className="max-w-md mx-auto py-12">
-            <div className="q-card p-10">
-              <h2 className="text-3xl font-black mb-2 leading-none">{role === 'teacher' ? 'Admin Access' : 'Student Access'}</h2>
-              <p className="text-sm opacity-50 mb-8 font-medium">Please enter your credentials to continue</p>
-              <form onSubmit={handleLogin} className="space-y-5">
-                <input required name="name" type="text" className="w-full h-14 px-5 rounded-2xl bg-gray-50 dark:bg-gray-800 border outline-none focus:border-blue-500 font-medium" placeholder="Full Name" />
-                <input required name="id" type="text" className="w-full h-14 px-5 rounded-2xl bg-gray-50 dark:bg-gray-800 border outline-none focus:border-blue-500 font-medium" placeholder="ID Number" />
-                {role === 'teacher' && <input required name="password" type="password" className="w-full h-14 px-5 rounded-2xl bg-gray-50 dark:bg-gray-800 border outline-none focus:border-blue-500 font-medium" placeholder="Security Passphrase" />}
-                {error && <p className="text-red-500 text-sm font-bold">{error}</p>}
-                <button type="submit" className="w-full h-14 bg-blue-600 text-white rounded-2xl font-black text-lg shadow-lg">Authenticate</button>
-                <button type="button" onClick={() => setView('home')} className="w-full text-center text-sm font-bold opacity-40">Cancel</button>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {view === 'teacher-dash' && <TeacherDash />}
-        {view === 'student-dash' && <StudentDash />}
-        {view === 'review-detail' && <ReviewDetailModal />}
-
-        {view === 'test-creator' && (
-          <div className="max-w-3xl mx-auto py-8">
-            <h2 className="text-4xl font-black mb-8">{editTestId ? 'Edit Exam Settings' : 'Draft New Exam'}</h2>
-            <form onSubmit={handleSaveTest} className="q-card p-10 space-y-8">
-              <div className="space-y-2">
-                <label className="text-sm font-black uppercase tracking-widest opacity-40">Test Information</label>
-                <input required name="title" defaultValue={tests.find(t => t.id === editTestId)?.title} className="w-full h-14 px-5 rounded-2xl bg-gray-50 dark:bg-gray-800 border outline-none focus:border-blue-500 font-bold text-xl" placeholder="E.g. Midterm Physics 2025" />
-              </div>
-              
-              {!editTestId && (
-                <div className="space-y-2">
-                  <label className="text-sm font-black uppercase tracking-widest opacity-40">Learning Material</label>
-                  <textarea required name="text" className="w-full h-64 p-5 rounded-2xl bg-gray-50 dark:bg-gray-800 border outline-none focus:border-blue-500 resize-none font-medium leading-relaxed" placeholder="Paste your study content here... AI will generate questions based on this." />
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-6">
-                <div className="space-y-2">
-                  <label className="text-sm font-black uppercase tracking-widest opacity-40">Questions</label>
-                  <input required type="number" name="count" defaultValue={10} min={5} max={50} disabled={!!editTestId} className="w-full h-14 px-5 rounded-2xl bg-gray-50 dark:bg-gray-800 border outline-none focus:border-blue-500 font-bold" />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-black uppercase tracking-widest opacity-40">Duration (Min)</label>
-                  <input required type="number" name="timer" defaultValue={tests.find(t => t.id === editTestId)?.timerMinutes || 15} min={1} max={120} className="w-full h-14 px-5 rounded-2xl bg-gray-50 dark:bg-gray-800 border outline-none focus:border-blue-500 font-bold" />
-                </div>
-              </div>
-              
-              {error && <p className="text-red-500 font-bold">{error}</p>}
-
-              <div className="flex gap-4 pt-4">
-                <button type="button" onClick={() => setView('teacher-dash')} className="flex-1 font-bold h-14">Discard</button>
-                <button disabled={isGenerating} type="submit" className="flex-[2] h-14 bg-blue-600 text-white rounded-2xl font-black text-lg shadow-xl shadow-blue-500/20">
-                  {isGenerating ? 'AI Working...' : editTestId ? 'Save Changes' : 'Generate & Publish'}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-md">
+                <button 
+                  onClick={() => { setRole('teacher'); setView('login'); }}
+                  className="group relative flex items-center justify-center gap-3 bg-white text-black font-bold py-4 px-8 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
+                >
+                  <GraduationCap className="w-5 h-5" />
+                  I'm a Teacher
+                  <ChevronRight className="w-4 h-4 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all" />
+                </button>
+                <button 
+                  onClick={() => { setRole('student'); setView('login'); }}
+                  className="group relative flex items-center justify-center gap-3 bg-zinc-900 border border-white/10 text-white font-bold py-4 px-8 rounded-xl transition-all hover:bg-zinc-800 hover:scale-[1.02] active:scale-[0.98]"
+                >
+                  <BookOpen className="w-5 h-5" />
+                  I'm a Student
+                  <ChevronRight className="w-4 h-4 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all" />
                 </button>
               </div>
-            </form>
-          </div>
-        )}
+            </motion.div>
+          )}
 
-        {view === 'test-taking' && activeTest && (
-          <div className="max-w-3xl mx-auto pb-32">
-             <header className="sticky top-0 bg-[var(--bg)]/80 backdrop-blur-xl py-6 z-50 flex justify-between items-center mb-8 border-b">
+          {view === 'login' && (
+            <motion.div 
+              key="login"
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="max-w-md mx-auto"
+            >
+              <div className="q-card p-8">
+                <button onClick={() => setView('home')} className="mb-6 flex items-center gap-2 text-zinc-500 hover:text-white transition-colors">
+                  <ArrowLeft className="w-4 h-4" /> Back
+                </button>
+                <h2 className="text-3xl font-bold mb-2">Welcome Back</h2>
+                <p className="text-zinc-500 mb-8">Enter your details to access the {role} dashboard.</p>
+                
+                <form onSubmit={handleLogin} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Full Name</label>
+                    <input required name="name" type="text" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="John Doe" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">{role === 'teacher' ? 'Teacher ID' : 'Student ID'}</label>
+                    <input required name="id" type="text" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="ID-12345" />
+                  </div>
+                  {role === 'teacher' && (
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Access Key</label>
+                      <input required name="password" type="password" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="••••" />
+                    </div>
+                  )}
+                  {error && <p className="text-red-500 text-sm font-medium">{error}</p>}
+                  <button type="submit" className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-red-600/20 mt-4">
+                    Continue to Dashboard
+                  </button>
+                </form>
+              </div>
+            </motion.div>
+          )}
+
+          {view === 'teacher-dash' && (
+            <motion.div 
+              key="teacher-dash"
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="space-y-8"
+            >
+              <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                 <div>
-                  <h3 className="font-black text-2xl tracking-tight">{activeTest.title}</h3>
-                  <p className="text-xs font-bold opacity-40 uppercase tracking-widest">Question {Object.keys(answers).length + 1} of {activeTest.questions.length}</p>
+                  <h2 className="text-4xl font-black tracking-tight">Teacher Dashboard</h2>
+                  <p className="text-zinc-500">Manage your tests and view student performance.</p>
                 </div>
-                <div className={`px-6 py-3 rounded-2xl font-mono text-xl font-black ${timeLeft < 60 ? 'bg-red-500 text-white animate-pulse' : 'bg-[var(--card)] border shadow-sm'}`}>
-                  {Math.floor(timeLeft / 60)}:{String(timeLeft % 60).padStart(2, '0')}
+                <button 
+                  onClick={() => setView('test-creator')}
+                  className="flex items-center justify-center gap-2 bg-red-600 hover:bg-red-500 text-white font-bold px-6 py-3 rounded-xl transition-all"
+                >
+                  <Plus className="w-5 h-5" /> Create New Test
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="lg:col-span-2 space-y-6">
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-red-500" /> Your Tests
+                  </h3>
+                  {tests.length === 0 ? (
+                    <div className="q-card p-12 text-center border-dashed">
+                      <FileText className="w-12 h-12 text-zinc-700 mx-auto mb-4" />
+                      <p className="text-zinc-500">No tests created yet. Start by creating your first AI-powered test.</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {tests.map(test => (
+                        <div key={test.id} className="q-card p-6 group hover:border-red-500/50 transition-all">
+                          <div className="flex justify-between items-start mb-4">
+                            <h4 className="font-bold text-lg line-clamp-1">{test.title}</h4>
+                            <div className="flex gap-2">
+                              <button onClick={() => startTest(test, true)} className="p-2 hover:bg-white/5 rounded-lg text-zinc-400 hover:text-white" title="Preview">
+                                <Eye className="w-4 h-4" />
+                              </button>
+                              <button onClick={() => setTests(tests.filter(t => t.id !== test.id))} className="p-2 hover:bg-white/5 rounded-lg text-zinc-400 hover:text-red-500" title="Delete">
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-4 text-sm text-zinc-500 mb-6">
+                            <span className="flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> {test.timerMinutes}m</span>
+                            <span className="flex items-center gap-1"><BookOpen className="w-3.5 h-3.5" /> {test.questions.length} Qs</span>
+                          </div>
+                          <div className="flex items-center justify-between pt-4 border-t border-white/5">
+                            <span className="text-[10px] uppercase tracking-widest text-zinc-600 font-bold">
+                              {new Date(test.createdAt).toLocaleDateString()}
+                            </span>
+                            <button onClick={() => startTest(test, true)} className="text-xs font-bold text-red-500 hover:underline">
+                              View Details
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-             </header>
-             <div className="space-y-6">
-                {activeTest.questions.map((q, i) => (
-                  <QuestionLayout 
-                    key={q.id} 
-                    question={q} 
-                    index={i} 
-                    selected={answers[q.id]} 
-                    onSelect={(label: string) => setAnswers({...answers, [q.id]: label})} 
-                  />
+
+                <div className="space-y-6">
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <BarChart3 className="w-5 h-5 text-red-500" /> Recent Activity
+                  </h3>
+                  <div className="q-card overflow-hidden">
+                    {results.length === 0 ? (
+                      <div className="p-8 text-center">
+                        <p className="text-zinc-500 text-sm">No student submissions yet.</p>
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-white/5">
+                        {results.slice(0, 5).map(res => (
+                          <div key={res.id} className="p-4 hover:bg-white/5 transition-colors cursor-pointer" onClick={() => { setActiveResult(res); setView('result-view'); }}>
+                            <div className="flex justify-between items-center mb-1">
+                              <span className="font-bold text-sm">{res.studentName}</span>
+                              <span className={cn("font-black text-sm", getScoreColor(res.score))}>{res.score}%</span>
+                            </div>
+                            <p className="text-xs text-zinc-500 truncate">{res.testTitle}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {view === 'student-dash' && (
+            <motion.div 
+              key="student-dash"
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="space-y-8"
+            >
+              <div>
+                <h2 className="text-4xl font-black tracking-tight">Student Dashboard</h2>
+                <p className="text-zinc-500">Select a test to begin or review your previous results.</p>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="lg:col-span-2 space-y-6">
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <BookOpen className="w-5 h-5 text-red-500" /> Available Tests
+                  </h3>
+                  {tests.length === 0 ? (
+                    <div className="q-card p-12 text-center border-dashed">
+                      <p className="text-zinc-500">No tests available at the moment. Check back later!</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {tests.map(test => (
+                        <div key={test.id} className="q-card p-6 group hover:border-red-500/50 transition-all">
+                          <h4 className="font-bold text-lg mb-2">{test.title}</h4>
+                          <div className="flex items-center gap-4 text-sm text-zinc-500 mb-6">
+                            <span className="flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> {test.timerMinutes}m</span>
+                            <span className="flex items-center gap-1"><BookOpen className="w-3.5 h-3.5" /> {test.questions.length} Qs</span>
+                          </div>
+                          <button 
+                            onClick={() => startTest(test)}
+                            className="w-full bg-white text-black font-bold py-2.5 rounded-lg hover:bg-red-600 hover:text-white transition-all flex items-center justify-center gap-2"
+                          >
+                            Start Test <ChevronRight className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-6">
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <CheckCircle2 className="w-5 h-5 text-red-500" /> Your Progress
+                  </h3>
+                  <div className="q-card p-6">
+                    {results.filter(r => r.studentId === user?.id).length === 0 ? (
+                      <p className="text-zinc-500 text-sm text-center">You haven't taken any tests yet.</p>
+                    ) : (
+                      <div className="space-y-4">
+                        {results.filter(r => r.studentId === user?.id).slice(0, 5).map(res => (
+                          <div key={res.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                            <div className="min-w-0">
+                              <p className="font-bold text-sm truncate">{res.testTitle}</p>
+                              <p className="text-[10px] text-zinc-500 uppercase tracking-wider">{new Date(res.timestamp).toLocaleDateString()}</p>
+                            </div>
+                            <span className={cn("font-black text-lg", getScoreColor(res.score))}>{res.score}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {view === 'test-creator' && (
+            <motion.div 
+              key="test-creator"
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="max-w-4xl mx-auto"
+            >
+              <div className="q-card p-8">
+                <button onClick={() => setView('teacher-dash')} className="mb-6 flex items-center gap-2 text-zinc-500 hover:text-white transition-colors">
+                  <ArrowLeft className="w-4 h-4" /> Back to Dashboard
+                </button>
+                
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+                  <div>
+                    <h2 className="text-3xl font-bold mb-1">Create New Test</h2>
+                    <p className="text-zinc-500">Choose how you want to build your assessment.</p>
+                  </div>
+                  <div className="flex bg-white/5 p-1 rounded-xl border border-white/10">
+                    <button 
+                      onClick={() => setCreationMode('ai')}
+                      className={cn(
+                        "px-4 py-2 rounded-lg text-sm font-bold transition-all",
+                        creationMode === 'ai' ? "bg-red-600 text-white shadow-lg" : "text-zinc-500 hover:text-white"
+                      )}
+                    >
+                      AI Generation
+                    </button>
+                    <button 
+                      onClick={() => setCreationMode('manual')}
+                      className={cn(
+                        "px-4 py-2 rounded-lg text-sm font-bold transition-all",
+                        creationMode === 'manual' ? "bg-red-600 text-white shadow-lg" : "text-zinc-500 hover:text-white"
+                      )}
+                    >
+                      Manual Creation
+                    </button>
+                  </div>
+                </div>
+
+                {creationMode === 'ai' ? (
+                  <form onSubmit={handleSaveTest} className="space-y-6">
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Test Title</label>
+                      <input required name="title" type="text" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="e.g. Biology Midterm Review" />
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Multiple Choice Questions</label>
+                        <select name="mcCount" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors">
+                          {[0, 5, 10, 15, 20, 30, 40, 50, 60].map(n => <option key={n} value={n}>{n} Questions</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Fill in the Blank Questions</label>
+                        <select name="fibCount" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors">
+                          {[0, 5, 10, 15, 20, 30, 40, 50, 60].map(n => <option key={n} value={n}>{n} Questions</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Number of Choices (for MC)</label>
+                        <select name="choiceCount" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors">
+                          {[2, 3, 4, 5, 6].map(n => <option key={n} value={n}>{n} Choices</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Timer (Minutes)</label>
+                        <select name="timer" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors">
+                          {[5, 10, 15, 20, 30, 45, 60].map(n => <option key={n} value={n}>{n} Minutes</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4">
+                      <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Study Material</label>
+                      <div 
+                        onClick={() => fileInputRef.current?.click()}
+                        className={cn(
+                          "border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all",
+                          uploadedFile ? "border-emerald-500/50 bg-emerald-500/5" : "border-white/10 hover:border-red-500/50 hover:bg-white/5"
+                        )}
+                      >
+                        <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept=".pdf,.docx,.pptx,.txt,.md" />
+                        {isExtracting ? (
+                          <div className="flex flex-col items-center gap-2">
+                            <Loader2 className="w-8 h-8 text-red-500 animate-spin" />
+                            <p className="text-sm font-medium">Extracting text...</p>
+                          </div>
+                        ) : uploadedFile ? (
+                          <div className="flex flex-col items-center gap-2">
+                            <CheckCircle2 className="w-8 h-8 text-emerald-500" />
+                            <p className="text-sm font-medium">{uploadedFile.name}</p>
+                            <button type="button" onClick={(e) => { e.stopPropagation(); setUploadedFile(null); setExtractedText(''); }} className="text-xs text-rose-500 hover:underline">Remove file</button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-center gap-2">
+                            <Upload className="w-8 h-8 text-zinc-500" />
+                            <p className="text-sm font-medium">Click to upload document</p>
+                            <p className="text-xs text-zinc-600">PDF, DOCX, PPTX, TXT</p>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="relative">
+                        <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-white/5"></span></div>
+                        <div className="relative flex justify-center text-xs uppercase"><span className="bg-black px-2 text-zinc-600 font-bold">Or Paste Text</span></div>
+                      </div>
+
+                      <textarea 
+                        name="text" 
+                        rows={6} 
+                        className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors resize-none" 
+                        placeholder="Paste your study notes here..."
+                        disabled={!!uploadedFile}
+                      ></textarea>
+                    </div>
+
+                    {error && <p className="text-red-500 text-sm font-medium">{error}</p>}
+
+                    <button 
+                      type="submit" 
+                      disabled={isGenerating}
+                      className="w-full bg-red-600 hover:bg-red-500 disabled:bg-zinc-800 text-white font-bold py-4 rounded-xl transition-all flex items-center justify-center gap-3"
+                    >
+                      {isGenerating ? (
+                        <>
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                          AI is generating questions...
+                        </>
+                      ) : (
+                        <>
+                          <BrainCircuit className="w-5 h-5" />
+                          Generate Test with AI
+                        </>
+                      )}
+                    </button>
+                  </form>
+                ) : (
+                  <form onSubmit={handleSaveManualTest} className="space-y-8">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Test Title</label>
+                        <input required name="title" type="text" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="e.g. Custom Quiz" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Timer (Minutes)</label>
+                        <select name="timer" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors">
+                          {[5, 10, 15, 20, 30, 45, 60].map(n => <option key={n} value={n}>{n} Minutes</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-6">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-xl font-bold">Questions</h3>
+                        <button 
+                          type="button"
+                          onClick={handleExpandQuestions}
+                          disabled={isExpanding}
+                          className="flex items-center gap-2 px-4 py-2 bg-red-600/10 border border-red-600/20 text-red-500 rounded-lg text-sm font-bold hover:bg-red-600/20 transition-all disabled:opacity-50"
+                        >
+                          {isExpanding ? <Loader2 className="w-4 h-4 animate-spin" /> : <BrainCircuit className="w-4 h-4" />}
+                          AI Expand (+5 Qs)
+                        </button>
+                      </div>
+
+                      <div className="space-y-6">
+                        {manualQuestions.map((q, qIdx) => (
+                          <div key={q.id} className="p-6 bg-white/5 rounded-2xl border border-white/10 relative group">
+                            <button 
+                              type="button"
+                              onClick={() => removeManualQuestion(q.id)}
+                              className="absolute top-4 right-4 p-2 text-zinc-600 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-all"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                            
+                            <div className="mb-4">
+                              <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Question {qIdx + 1}</label>
+                              <input 
+                                required
+                                value={q.text}
+                                onChange={(e) => updateManualQuestion(q.id, { text: e.target.value })}
+                                className="w-full bg-transparent border-b border-white/10 py-2 text-lg focus:border-red-500 outline-none transition-colors"
+                                placeholder="Enter your question here..."
+                              />
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                              <div>
+                                <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Question Type</label>
+                                <select 
+                                  value={q.type}
+                                  onChange={(e) => {
+                                    const newType = e.target.value as QuestionType;
+                                    const updates: Partial<Question> = { type: newType };
+                                    if (newType === QuestionType.FILL_IN_THE_BLANK) {
+                                      updates.options = undefined;
+                                      updates.correctAnswer = '';
+                                    } else {
+                                      updates.options = [
+                                        { label: 'A', text: '' },
+                                        { label: 'B', text: '' },
+                                        { label: 'C', text: '' },
+                                        { label: 'D', text: '' },
+                                      ];
+                                      updates.correctAnswer = 'A';
+                                    }
+                                    updateManualQuestion(q.id, updates);
+                                  }}
+                                  className="w-full bg-black border border-white/10 rounded-lg px-4 py-2 text-sm focus:border-red-500 outline-none transition-colors"
+                                >
+                                  <option value={QuestionType.MULTIPLE_CHOICE}>Multiple Choice</option>
+                                  <option value={QuestionType.FILL_IN_THE_BLANK}>Fill in the Blank</option>
+                                </select>
+                              </div>
+                              {q.type === QuestionType.MULTIPLE_CHOICE && (
+                                <div>
+                                  <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Number of Choices</label>
+                                  <select 
+                                    value={q.options?.length || 4}
+                                    onChange={(e) => {
+                                      const count = Number(e.target.value);
+                                      const currentOptions = q.options || [];
+                                      let newOptions = [...currentOptions];
+                                      if (count > currentOptions.length) {
+                                        for (let i = currentOptions.length; i < count; i++) {
+                                          newOptions.push({ label: String.fromCharCode(65 + i), text: '' });
+                                        }
+                                      } else {
+                                        newOptions = currentOptions.slice(0, count);
+                                      }
+                                      updateManualQuestion(q.id, { options: newOptions });
+                                    }}
+                                    className="w-full bg-black border border-white/10 rounded-lg px-4 py-2 text-sm focus:border-red-500 outline-none transition-colors"
+                                  >
+                                    {[2, 3, 4, 5, 6].map(n => <option key={n} value={n}>{n} Choices</option>)}
+                                  </select>
+                                </div>
+                              )}
+                            </div>
+
+                            {q.type === QuestionType.MULTIPLE_CHOICE ? (
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {q.options?.map((opt, oIdx) => (
+                                  <div key={opt.label} className="flex items-center gap-3">
+                                    <button
+                                      type="button"
+                                      onClick={() => updateManualQuestion(q.id, { correctAnswer: opt.label })}
+                                      className={cn(
+                                        "w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs transition-all",
+                                        q.correctAnswer === opt.label ? "bg-emerald-500 text-white" : "bg-white/10 text-zinc-500 hover:bg-white/20"
+                                      )}
+                                    >
+                                      {opt.label}
+                                    </button>
+                                    <input 
+                                      required
+                                      value={opt.text}
+                                      onChange={(e) => {
+                                        const newOptions = [...(q.options || [])];
+                                        newOptions[oIdx] = { ...opt, text: e.target.value };
+                                        updateManualQuestion(q.id, { options: newOptions });
+                                      }}
+                                      className="flex-1 bg-white/5 border border-white/5 rounded-lg px-3 py-2 text-sm focus:border-red-500 outline-none transition-colors"
+                                      placeholder={`Option ${opt.label}`}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div>
+                                <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Correct Answer</label>
+                                <input 
+                                  required
+                                  value={q.correctAnswer}
+                                  onChange={(e) => updateManualQuestion(q.id, { correctAnswer: e.target.value })}
+                                  className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors"
+                                  placeholder="Enter the correct answer..."
+                                />
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+
+                      <button 
+                        type="button"
+                        onClick={addManualQuestion}
+                        className="w-full py-4 border-2 border-dashed border-white/10 rounded-2xl text-zinc-500 hover:border-red-500/50 hover:text-white transition-all flex items-center justify-center gap-2"
+                      >
+                        <Plus className="w-5 h-5" /> Add Question
+                      </button>
+                    </div>
+
+                    {error && <p className="text-red-500 text-sm font-medium">{error}</p>}
+
+                    <button 
+                      type="submit" 
+                      className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-red-600/20"
+                    >
+                      Save Manual Test
+                    </button>
+                  </form>
+                )}
+              </div>
+            </motion.div>
+          )}
+
+          {view === 'test-taking' && activeTest && (
+            <motion.div 
+              key="test-taking"
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="max-w-4xl mx-auto"
+            >
+              <div className="sticky top-20 z-40 bg-black/80 backdrop-blur-md p-4 mb-8 rounded-xl border border-white/10 flex items-center justify-between">
+                <div>
+                  <h2 className="font-bold text-lg">{activeTest.title}</h2>
+                  <p className="text-xs text-zinc-500">{activeTest.questions.length} Questions</p>
+                </div>
+                {!isPreviewMode && (
+                  <div className={cn(
+                    "flex items-center gap-2 px-4 py-2 rounded-lg font-mono font-bold",
+                    timeLeft < 60 ? "bg-rose-500/20 text-rose-500 animate-pulse" : "bg-white/5 text-white"
+                  )}>
+                    <Clock className="w-4 h-4" />
+                    {formatTime(timeLeft)}
+                  </div>
+                )}
+                {isPreviewMode && (
+                  <span className="px-3 py-1 bg-amber-500/20 text-amber-500 text-xs font-bold rounded-full uppercase tracking-wider">Preview Mode</span>
+                )}
+              </div>
+
+              <div className="space-y-8">
+                {activeTest.questions.map((q, idx) => (
+                  <div key={q.id} className="q-card p-8">
+                    <div className="flex gap-4 mb-6">
+                      <span className="flex-shrink-0 w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center font-bold text-zinc-500">{idx + 1}</span>
+                      <h3 className="text-xl font-medium leading-relaxed">{q.text}</h3>
+                    </div>
+                    
+                    {q.type === QuestionType.MULTIPLE_CHOICE ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 ml-12">
+                        {q.options?.map(opt => (
+                          <button
+                            key={opt.label}
+                            onClick={() => setAnswers({ ...answers, [q.id]: opt.label })}
+                            className={cn(
+                              "flex items-center gap-4 p-4 rounded-xl border transition-all text-left",
+                              answers[q.id] === opt.label 
+                                ? "bg-red-600/10 border-red-600 text-white" 
+                                : "bg-white/5 border-white/5 text-zinc-400 hover:border-white/20 hover:bg-white/10"
+                            )}
+                          >
+                            <span className={cn(
+                              "w-6 h-6 rounded flex items-center justify-center text-xs font-bold",
+                              answers[q.id] === opt.label ? "bg-red-600 text-white" : "bg-white/10 text-zinc-500"
+                            )}>
+                              {opt.label}
+                            </span>
+                            <span className="font-medium">{opt.text}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="ml-12">
+                        <input 
+                          type="text"
+                          value={answers[q.id] || ''}
+                          onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
+                          className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors"
+                          placeholder="Type your answer here..."
+                        />
+                      </div>
+                    )}
+                  </div>
                 ))}
-             </div>
-             <div className="fixed bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[var(--bg)] to-transparent pointer-events-none">
-                <div className="max-w-3xl mx-auto pointer-events-auto">
-                  <button onClick={handleTestSubmit} className="w-full h-16 bg-blue-600 text-white rounded-[1.25rem] font-black text-xl shadow-2xl shadow-blue-600/40 transform hover:scale-[1.02] active:scale-95 transition-all">Submit Final Answers</button>
+
+                <div className="pt-8 flex justify-center">
+                  <button 
+                    onClick={handleTestSubmit}
+                    className="bg-red-600 hover:bg-red-500 text-white font-bold px-12 py-4 rounded-xl transition-all shadow-xl shadow-red-600/20"
+                  >
+                    {isPreviewMode ? 'Close Preview' : 'Submit Test'}
+                  </button>
                 </div>
-             </div>
-          </div>
-        )}
+              </div>
+            </motion.div>
+          )}
 
-        {view === 'result-view' && activeResult && (
-          <div className="max-w-xl mx-auto py-20 text-center animate-in zoom-in-95">
-             <div className="w-32 h-32 rounded-[2.5rem] bg-blue-600 text-white flex items-center justify-center text-4xl font-black mx-auto mb-8 shadow-2xl shadow-blue-600/30">
-               {activeResult.score}%
-             </div>
-             <h2 className="text-4xl font-black tracking-tight mb-2">Well Done, {user?.name.split(' ')[0]}!</h2>
-             <p className="opacity-50 font-medium mb-12">Your score has been successfully reported to the staff dashboard for review.</p>
-             
-             <div className="bg-blue-50 dark:bg-blue-900/20 p-8 rounded-3xl text-left border border-blue-100 dark:border-blue-800 mb-10">
-               <h4 className="font-black text-blue-700 dark:text-blue-400 text-xs uppercase tracking-widest mb-4 flex items-center gap-2">
-                 <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-                 AI Mentor Feedback
-               </h4>
-               <p className="text-sm font-medium leading-relaxed opacity-80 whitespace-pre-line">{activeResult.aiFeedback}</p>
-             </div>
+          {view === 'result-view' && activeResult && (
+            <motion.div 
+              key="result-view"
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="max-w-4xl mx-auto"
+            >
+              <div className="q-card p-12 text-center mb-8 bg-gradient-to-b from-white/5 to-transparent">
+                <div className="mb-6">
+                  {activeResult.score >= 80 ? (
+                    <div className="w-20 h-20 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <CheckCircle2 className="w-12 h-12 text-emerald-500" />
+                    </div>
+                  ) : activeResult.score >= 50 ? (
+                    <div className="w-20 h-20 bg-amber-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <BarChart3 className="w-12 h-12 text-amber-500" />
+                    </div>
+                  ) : (
+                    <div className="w-20 h-20 bg-rose-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <XCircle className="w-12 h-12 text-rose-500" />
+                    </div>
+                  )}
+                </div>
+                <h2 className="text-5xl font-black mb-2">{activeResult.score}%</h2>
+                <p className="text-zinc-500 mb-8 uppercase tracking-widest font-bold">Test Completed</p>
+                
+                <div className="grid grid-cols-3 gap-4 max-w-md mx-auto mb-12">
+                  <div className="p-4 bg-white/5 rounded-xl">
+                    <p className="text-xs text-zinc-500 mb-1">Correct</p>
+                    <p className="text-xl font-bold text-emerald-500">{activeResult.correctCount}</p>
+                  </div>
+                  <div className="p-4 bg-white/5 rounded-xl">
+                    <p className="text-xs text-zinc-500 mb-1">Incorrect</p>
+                    <p className="text-xl font-bold text-rose-500">{activeResult.totalQuestions - activeResult.correctCount}</p>
+                  </div>
+                  <div className="p-4 bg-white/5 rounded-xl">
+                    <p className="text-xs text-zinc-500 mb-1">Total</p>
+                    <p className="text-xl font-bold">{activeResult.totalQuestions}</p>
+                  </div>
+                </div>
 
-             <div className="flex flex-col gap-3">
-               <button onClick={() => setView('review-detail')} className="w-full h-14 border-2 rounded-2xl font-black">Review My Answers</button>
-               <button onClick={() => setView('student-dash')} className="w-full h-14 bg-gray-900 text-white dark:bg-white dark:text-gray-900 rounded-2xl font-black shadow-lg">Back to Home</button>
-             </div>
-          </div>
-        )}
+                {activeResult.aiFeedback && (
+                  <div className="bg-red-600/5 border border-red-600/20 rounded-2xl p-8 text-left mb-12">
+                    <h3 className="flex items-center gap-2 font-bold text-red-500 mb-4">
+                      <BrainCircuit className="w-5 h-5" /> AI Study Insight
+                    </h3>
+                    <p className="text-zinc-300 leading-relaxed italic">"{activeResult.aiFeedback}"</p>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap justify-center gap-4">
+                  <button 
+                    onClick={() => setView(user?.role === 'teacher' ? 'teacher-dash' : 'student-dash')}
+                    className="bg-white text-black font-bold px-8 py-3 rounded-xl hover:bg-zinc-200 transition-all"
+                  >
+                    Back to Dashboard
+                  </button>
+                  <button 
+                    onClick={() => window.print()}
+                    className="flex items-center gap-2 bg-zinc-900 border border-white/10 text-white font-bold px-8 py-3 rounded-xl hover:bg-zinc-800 transition-all"
+                  >
+                    <Download className="w-4 h-4" /> Export PDF
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-6">
+                <h3 className="text-xl font-bold px-4">Review Answers</h3>
+                {activeResult.questionsSnapshot.map((q, idx) => (
+                  <div key={q.id} className="q-card p-8">
+                    <div className="flex gap-4 mb-6">
+                      <span className="flex-shrink-0 w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center font-bold text-zinc-500">{idx + 1}</span>
+                      <h3 className="text-xl font-medium leading-relaxed">{q.text}</h3>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 ml-12">
+                      {q.options.map(opt => {
+                        const isUserAnswer = activeResult.userAnswers[q.id] === opt.label;
+                        const isCorrect = q.correctAnswer === opt.label;
+                        return (
+                          <div
+                            key={opt.label}
+                            className={cn(
+                              "flex items-center gap-4 p-4 rounded-xl border transition-all",
+                              isCorrect ? "bg-emerald-500/10 border-emerald-500 text-emerald-500" :
+                              isUserAnswer ? "bg-rose-500/10 border-rose-500 text-rose-500" :
+                              "bg-white/5 border-white/5 text-zinc-500"
+                            )}
+                          >
+                            <span className={cn(
+                              "w-6 h-6 rounded flex items-center justify-center text-xs font-bold",
+                              isCorrect ? "bg-emerald-500 text-white" :
+                              isUserAnswer ? "bg-rose-500 text-white" :
+                              "bg-white/10 text-zinc-600"
+                            )}>
+                              {opt.label}
+                            </span>
+                            <span className="font-medium">{opt.text}</span>
+                            {isCorrect && <CheckCircle2 className="w-4 h-4 ml-auto" />}
+                            {isUserAnswer && !isCorrect && <XCircle className="w-4 h-4 ml-auto" />}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Edit Confirmation Modal */}
+        <AnimatePresence>
+          {showEditConfirm && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+            >
+              <motion.div 
+                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                className="q-card max-w-md w-full p-8 border-red-500/50"
+              >
+                <div className="w-16 h-16 bg-red-600/20 rounded-2xl flex items-center justify-center mb-6">
+                  <AlertTriangle className="w-8 h-8 text-red-500" />
+                </div>
+                <h3 className="text-2xl font-bold mb-4">Confirm Test Changes</h3>
+                <p className="text-zinc-400 mb-8 leading-relaxed">
+                  Warning: Modifying an existing test will affect how historical student results are displayed. 
+                  Previous submissions might not align perfectly with the new version of the test.
+                </p>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <button 
+                    onClick={() => pendingSaveData && performSave(pendingSaveData)}
+                    className="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl transition-all"
+                  >
+                    Confirm & Save
+                  </button>
+                  <button 
+                    onClick={() => { setShowEditConfirm(false); setPendingSaveData(null); }}
+                    className="flex-1 bg-white/5 hover:bg-white/10 text-white font-bold py-3 rounded-xl transition-all border border-white/10"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </main>
+
+      <footer className="border-t border-white/5 py-12 px-4">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-8">
+          <div className="flex items-center gap-2 opacity-50">
+            <BrainCircuit className="w-5 h-5" />
+            <span className="font-bold tracking-tight">QuickStudy AI</span>
+          </div>
+          <p className="text-zinc-600 text-sm">© 2026 QuickStudy LMS. All rights reserved.</p>
+          <div className="flex gap-6 text-zinc-600 text-sm font-medium">
+            <a href="#" className="hover:text-white transition-colors">Privacy</a>
+            <a href="#" className="hover:text-white transition-colors">Terms</a>
+            <a href="#" className="hover:text-white transition-colors">Support</a>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 };
