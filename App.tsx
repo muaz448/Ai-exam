@@ -29,9 +29,8 @@ import { Question, Theme, ViewState, User, Test, TestResult, QuestionType } from
 import { generateQuestionsWithGemini, getAIStudyFeedback, expandQuestionsWithGemini, getAIExplanation } from './services/geminiService';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { auth, db, googleProvider, handleFirestoreError, OperationType } from './firebase';
-import { signInWithPopup, onAuthStateChanged, signOut } from 'firebase/auth';
-import { collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, where, orderBy, limit, addDoc, serverTimestamp } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from './firebase';
+import { collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, where, orderBy, limit, addDoc } from 'firebase/firestore';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -84,6 +83,8 @@ const App: React.FC = () => {
   const [feedbackText, setFeedbackText] = useState("");
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [notifications, setNotifications] = useState<TestResult[]>([]);
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
 
   const addManualQuestion = () => {
     setManualQuestions([...manualQuestions, {
@@ -157,29 +158,26 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        try {
-          const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-          if (userDoc.exists()) {
-            setUser(userDoc.data() as User);
-          } else {
-            // If user exists in Auth but not in Firestore, we might need to prompt for role
-            // For now, we'll keep the existing role selection logic
-          }
-        } catch (err) {
-          handleFirestoreError(err, OperationType.GET, `users/${firebaseUser.uid}`);
+    const savedUser = localStorage.getItem('qs_user');
+    if (savedUser) {
+      const parsedUser = JSON.parse(savedUser);
+      // Verify user still exists in DB
+      getDoc(doc(db, 'users', parsedUser.id)).then(docSnap => {
+        if (docSnap.exists()) {
+          setUser(docSnap.data() as User);
+        } else {
+          localStorage.removeItem('qs_user');
+          setUser(null);
         }
-      } else {
-        setUser(null);
-        setRole(null);
-        setView('home');
-      }
+        setIsAuthReady(true);
+      }).catch(() => {
+        setIsAuthReady(true);
+      });
+    } else {
       setIsAuthReady(true);
-    });
+    }
 
     document.documentElement.classList.add('dark');
-    return () => unsubscribeAuth();
   }, []);
 
   useEffect(() => {
@@ -303,39 +301,71 @@ const App: React.FC = () => {
   const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
+    const name = formData.get('name') as string;
+    const id = formData.get('id') as string;
     const password = formData.get('password') as string;
 
-    if (role === 'teacher' && password !== '1996') {
-      setError('Incorrect Teacher Password.');
-      return;
-    }
-
     try {
-      const result = await signInWithPopup(auth, googleProvider);
-      const firebaseUser = result.user;
-      
-      const userDocRef = doc(db, 'users', firebaseUser.uid);
+      const userDocRef = doc(db, 'users', id);
       const userDoc = await getDoc(userDocRef);
       
       let userData: User;
       if (!userDoc.exists()) {
+        // Create new user
+        if (role === 'teacher' && password !== '1996') {
+          setError('Incorrect Teacher Password for new account.');
+          return;
+        }
         userData = {
-          id: firebaseUser.uid,
-          name: firebaseUser.displayName || 'Anonymous',
-          role: role!
+          id,
+          name,
+          role: role!,
+          password: role === 'teacher' ? password : undefined
         };
         await setDoc(userDocRef, userData);
       } else {
         userData = userDoc.data() as User;
+        if (userData.role !== role) {
+          setError(`This ID is registered as a ${userData.role}. Please select the correct role.`);
+          return;
+        }
+        if (role === 'teacher') {
+          if (userData.password !== password) {
+            setError('Incorrect Password.');
+            return;
+          }
+        }
       }
       
       setUser(userData);
+      localStorage.setItem('qs_user', JSON.stringify(userData));
       setError(null);
       setView(userData.role === 'teacher' ? 'teacher-dash' : 'student-dash');
     } catch (err) {
       setError('Login failed. Please try again.');
       console.error(err);
     }
+  };
+
+  const handleChangePassword = async () => {
+    if (!user || user.role !== 'teacher' || !newPassword) return;
+    try {
+      await updateDoc(doc(db, 'users', user.id), { password: newPassword });
+      const updatedUser = { ...user, password: newPassword };
+      setUser(updatedUser);
+      localStorage.setItem('qs_user', JSON.stringify(updatedUser));
+      setNewPassword("");
+      setShowChangePassword(false);
+      alert("Password updated successfully!");
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${user.id}`);
+    }
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    localStorage.removeItem('qs_user');
+    setView('home');
   };
 
   const performSave = async (newTest: Test) => {
@@ -593,7 +623,7 @@ const App: React.FC = () => {
               </span>
             </div>
             <button 
-              onClick={() => signOut(auth)}
+              onClick={handleLogout}
               className="p-2 hover:bg-white/10 rounded-full transition-colors text-red-500"
               title="Logout"
             >
@@ -669,7 +699,7 @@ const App: React.FC = () => {
               exit="exit"
               className="max-w-md mx-auto"
             >
-              <div className="q-card p-8 text-center">
+              <div className="q-card p-8">
                 <button onClick={() => setView('home')} className="mb-6 flex items-center gap-2 text-zinc-500 hover:text-white transition-colors">
                   <ArrowLeft className="w-4 h-4" /> Back
                 </button>
@@ -677,19 +707,27 @@ const App: React.FC = () => {
                   {role === 'teacher' ? <GraduationCap className="w-8 h-8 text-red-500" /> : <BookOpen className="w-8 h-8 text-red-500" />}
                 </div>
                 <h2 className="text-3xl font-bold mb-2">Welcome {role === 'teacher' ? 'Teacher' : 'Student'}</h2>
-                <p className="text-zinc-500 mb-8">Sign in with your Google account to access your dashboard.</p>
+                <p className="text-zinc-500 mb-8">Enter your details to access your dashboard.</p>
                 
                 <form onSubmit={handleLogin} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Full Name</label>
+                    <input required name="name" type="text" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="John Doe" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">User ID</label>
+                    <input required name="id" type="text" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="ID-12345" />
+                  </div>
                   {role === 'teacher' && (
                     <div className="text-left">
-                      <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Teacher Access Key</label>
+                      <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Password</label>
                       <input required name="password" type="password" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="••••" />
+                      <p className="text-[10px] text-zinc-600 mt-1">Initial password is 1996</p>
                     </div>
                   )}
                   {error && <p className="text-red-500 text-sm font-medium mb-4">{error}</p>}
-                  <button type="submit" className="w-full bg-white text-black font-bold py-4 rounded-xl transition-all shadow-lg hover:bg-zinc-200 flex items-center justify-center gap-3">
-                    <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
-                    Sign in with Google
+                  <button type="submit" className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-red-600/20 mt-4">
+                    Continue to Dashboard
                   </button>
                 </form>
               </div>
@@ -710,13 +748,59 @@ const App: React.FC = () => {
                   <h2 className="text-4xl font-black tracking-tight">Teacher Dashboard</h2>
                   <p className="text-zinc-500">Manage your tests and view student performance.</p>
                 </div>
-                <button 
-                  onClick={() => setView('test-creator')}
-                  className="flex items-center justify-center gap-2 bg-red-600 hover:bg-red-500 text-white font-bold px-6 py-3 rounded-xl transition-all"
-                >
-                  <Plus className="w-5 h-5" /> Create New Test
-                </button>
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setShowChangePassword(true)}
+                    className="flex items-center justify-center gap-2 bg-white/5 hover:bg-white/10 text-white font-bold px-6 py-3 rounded-xl transition-all border border-white/10"
+                  >
+                    <Lock className="w-5 h-5" /> Change Password
+                  </button>
+                  <button 
+                    onClick={() => setView('test-creator')}
+                    className="flex items-center justify-center gap-2 bg-red-600 hover:bg-red-500 text-white font-bold px-6 py-3 rounded-xl transition-all"
+                  >
+                    <Plus className="w-5 h-5" /> Create New Test
+                  </button>
+                </div>
               </div>
+
+              <AnimatePresence>
+                {showChangePassword && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.95 }}
+                    className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+                  >
+                    <div className="q-card p-8 max-w-md w-full">
+                      <div className="flex justify-between items-center mb-6">
+                        <h3 className="text-2xl font-bold">Change Password</h3>
+                        <button onClick={() => setShowChangePassword(false)} className="p-2 hover:bg-white/10 rounded-full">
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">New Password</label>
+                          <input 
+                            type="password" 
+                            value={newPassword}
+                            onChange={(e) => setNewPassword(e.target.value)}
+                            className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" 
+                            placeholder="••••" 
+                          />
+                        </div>
+                        <button 
+                          onClick={handleChangePassword}
+                          className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-4 rounded-xl transition-all"
+                        >
+                          Update Password
+                        </button>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div className="lg:col-span-2 space-y-6">
