@@ -1,0 +1,67 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["teacher", "student"] },
+        "email": { "type": "string", "format": "email" }
+      },
+      "required": ["id", "name", "role"]
+    },
+    "Test": {
+      "title": "Test",
+      "description": "A test created by a teacher.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "questions": { "type": "array" },
+        "createdAt": { "type": "number" },
+        "timerMinutes": { "type": "number" },
+        "creatorId": { "type": "string" }
+      },
+      "required": ["id", "title", "questions", "createdAt", "timerMinutes", "creatorId"]
+    },
+    "TestResult": {
+      "title": "TestResult",
+      "description": "A student's submission for a test.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "testId": { "type": "string" },
+        "testTitle": { "type": "string" },
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "score": { "type": "number" },
+        "totalQuestions": { "type": "number" },
+        "correctCount": { "type": "number" },
+        "timestamp": { "type": "number" },
+        "userAnswers": { "type": "object" },
+        "questionsSnapshot": { "type": "array" },
+        "aiFeedback": { "type": "string" },
+        "timePerQuestion": { "type": "object" },
+        "teacherFeedback": { "type": "string" },
+        "feedbackRead": { "type": "boolean", "description": "Whether the student has read the teacher's feedback." }
+      },
+      "required": ["id", "testId", "studentId", "score", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles."
+    },
+    "/tests/{testId}": {
+      "schema": "Test",
+      "description": "Tests created by teachers."
+    },
+    "/results/{resultId}": {
+      "schema": "TestResult",
+      "description": "Test results submitted by students."
+    }
+  }
+}

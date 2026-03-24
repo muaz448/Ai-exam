@@ -107,3 +107,18 @@ export const getAIStudyFeedback = async (score: number, missedQuestions: string[
   });
   return response.text || "Focus on the missed concepts!";
 };
+
+export const getAIExplanation = async (question: Question, userAnswer: string): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    config: { thinkingConfig: { thinkingBudget: 0 } },
+    contents: `Explain why the correct answer for this question is "${question.correctAnswer}".
+    Question: ${question.text}
+    ${question.options ? `Options: ${question.options.map(o => `${o.label}: ${o.text}`).join(", ")}` : ""}
+    Student's Answer: ${userAnswer}
+    
+    Keep it short and helpful.`,
+  });
+  return response.text || "No explanation available.";
+};

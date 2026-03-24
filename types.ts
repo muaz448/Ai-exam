@@ -38,6 +38,8 @@ export interface TestResult {
   userAnswers: Record<string, string>; // Maps questionId to label
   questionsSnapshot: Question[]; // Snapshot of questions at time of test
   aiFeedback?: string;
+  timePerQuestion?: Record<string, number>; // Maps questionId to seconds spent
+  teacherFeedback?: string;
 }
 
 export interface User {

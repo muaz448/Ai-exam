@@ -21,12 +21,17 @@ import {
   BrainCircuit,
   AlertTriangle,
   Menu,
-  X
+  X,
+  Lock,
+  Bell
 } from 'lucide-react';
 import { Question, Theme, ViewState, User, Test, TestResult, QuestionType } from './types';
-import { generateQuestionsWithGemini, getAIStudyFeedback, expandQuestionsWithGemini } from './services/geminiService';
+import { generateQuestionsWithGemini, getAIStudyFeedback, expandQuestionsWithGemini, getAIExplanation } from './services/geminiService';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { auth, db, googleProvider, handleFirestoreError, OperationType } from './firebase';
+import { signInWithPopup, onAuthStateChanged, signOut } from 'firebase/auth';
+import { collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, where, orderBy, limit, addDoc, serverTimestamp } from 'firebase/firestore';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -70,6 +75,15 @@ const App: React.FC = () => {
     }
   ]);
   const [isExpanding, setIsExpanding] = useState(false);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [timePerQuestion, setTimePerQuestion] = useState<Record<string, number>>({});
+  const [lastQuestionChangeTime, setLastQuestionChangeTime] = useState<number>(0);
+  const [isExplaining, setIsExplaining] = useState<string | null>(null); // questionId being explained
+  const [explanations, setExplanations] = useState<Record<string, string>>({});
+  const [showAnalytics, setShowAnalytics] = useState<string | null>(null); // testId for analytics
+  const [feedbackText, setFeedbackText] = useState("");
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [notifications, setNotifications] = useState<TestResult[]>([]);
 
   const addManualQuestion = () => {
     setManualQuestions([...manualQuestions, {
@@ -143,15 +157,62 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    const savedTests = localStorage.getItem('qs_tests');
-    const savedResults = localStorage.getItem('qs_results');
-    if (savedTests) setTests(JSON.parse(savedTests));
-    if (savedResults) setResults(JSON.parse(savedResults));
+    const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        try {
+          const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+          if (userDoc.exists()) {
+            setUser(userDoc.data() as User);
+          } else {
+            // If user exists in Auth but not in Firestore, we might need to prompt for role
+            // For now, we'll keep the existing role selection logic
+          }
+        } catch (err) {
+          handleFirestoreError(err, OperationType.GET, `users/${firebaseUser.uid}`);
+        }
+      } else {
+        setUser(null);
+        setRole(null);
+        setView('home');
+      }
+      setIsAuthReady(true);
+    });
+
     document.documentElement.classList.add('dark');
+    return () => unsubscribeAuth();
   }, []);
 
-  useEffect(() => localStorage.setItem('qs_tests', JSON.stringify(tests)), [tests]);
-  useEffect(() => localStorage.setItem('qs_results', JSON.stringify(results)), [results]);
+  useEffect(() => {
+    if (!isAuthReady || !user) return;
+
+    const testsQuery = query(collection(db, 'tests'), orderBy('createdAt', 'desc'));
+    const unsubscribeTests = onSnapshot(testsQuery, (snapshot) => {
+      const testsData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Test));
+      setTests(testsData);
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'tests'));
+
+    let resultsQuery;
+    if (user.role === 'teacher') {
+      resultsQuery = query(collection(db, 'results'), orderBy('timestamp', 'desc'));
+    } else {
+      resultsQuery = query(collection(db, 'results'), where('studentId', '==', user.id), orderBy('timestamp', 'desc'));
+    }
+
+    const unsubscribeResults = onSnapshot(resultsQuery, (snapshot) => {
+      const resultsData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as TestResult));
+      setResults(resultsData);
+      
+      if (user.role === 'student') {
+        const unread = resultsData.filter(r => r.teacherFeedback && !r.feedbackRead);
+        setNotifications(unread);
+      }
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'results'));
+
+    return () => {
+      unsubscribeTests();
+      unsubscribeResults();
+    };
+  }, [isAuthReady, user]);
 
   useEffect(() => {
     if (view === 'test-taking' && !isPreviewMode && timeLeft > 0) {
@@ -239,45 +300,72 @@ const App: React.FC = () => {
     }
   };
 
-  const handleLogin = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const name = formData.get('name') as string;
-    const id = formData.get('id') as string;
     const password = formData.get('password') as string;
+
     if (role === 'teacher' && password !== '1996') {
       setError('Incorrect Teacher Password.');
       return;
     }
-    setUser({ id, name, role: role! });
-    setError(null);
-    setView(role === 'teacher' ? 'teacher-dash' : 'student-dash');
+
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      const firebaseUser = result.user;
+      
+      const userDocRef = doc(db, 'users', firebaseUser.uid);
+      const userDoc = await getDoc(userDocRef);
+      
+      let userData: User;
+      if (!userDoc.exists()) {
+        userData = {
+          id: firebaseUser.uid,
+          name: firebaseUser.displayName || 'Anonymous',
+          role: role!
+        };
+        await setDoc(userDocRef, userData);
+      } else {
+        userData = userDoc.data() as User;
+      }
+      
+      setUser(userData);
+      setError(null);
+      setView(userData.role === 'teacher' ? 'teacher-dash' : 'student-dash');
+    } catch (err) {
+      setError('Login failed. Please try again.');
+      console.error(err);
+    }
   };
 
-  const performSave = (newTest: Test) => {
-    if (editTestId) {
-      setTests(prev => prev.map(t => t.id === editTestId ? newTest : t));
-    } else {
-      setTests([newTest, ...tests]);
+  const performSave = async (newTest: Test) => {
+    try {
+      if (editTestId) {
+        await updateDoc(doc(db, 'tests', editTestId), { ...newTest });
+      } else {
+        await addDoc(collection(db, 'tests'), { ...newTest });
+      }
+      setEditTestId(null);
+      setShowEditConfirm(false);
+      setPendingSaveData(null);
+      setUploadedFile(null);
+      setExtractedText('');
+      setManualQuestions([{
+        id: `q-manual-${Date.now()}`,
+        text: '',
+        type: QuestionType.MULTIPLE_CHOICE,
+        options: [
+          { label: 'A', text: '' },
+          { label: 'B', text: '' },
+          { label: 'C', text: '' },
+          { label: 'D', text: '' },
+        ],
+        correctAnswer: 'A'
+      }]);
+      setView('teacher-dash');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'tests');
     }
-    setEditTestId(null);
-    setShowEditConfirm(false);
-    setPendingSaveData(null);
-    setUploadedFile(null);
-    setExtractedText('');
-    setManualQuestions([{
-      id: `q-manual-${Date.now()}`,
-      text: '',
-      type: QuestionType.MULTIPLE_CHOICE,
-      options: [
-        { label: 'A', text: '' },
-        { label: 'B', text: '' },
-        { label: 'C', text: '' },
-        { label: 'D', text: '' },
-      ],
-      correctAnswer: 'A'
-    }]);
-    setView('teacher-dash');
   };
 
   const handleSaveTest = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -329,34 +417,142 @@ const App: React.FC = () => {
   };
 
   const startTest = (test: Test, preview: boolean = false) => {
+    const hasTaken = results.some(r => r.testId === test.id && r.studentId === user?.id);
+    if (hasTaken && !preview) {
+      const result = results.find(r => r.testId === test.id && r.studentId === user?.id);
+      if (result) {
+        setActiveResult(result);
+        setView('result-view');
+      }
+      return;
+    }
     setActiveTest(test);
     setAnswers({});
     setIsPreviewMode(preview);
     setTimeLeft(test.timerMinutes * 60);
+    setCurrentQuestionIndex(0);
+    setTimePerQuestion({});
+    setLastQuestionChangeTime(Date.now());
     setView('test-taking');
   };
 
   const handleTestSubmit = async () => {
     if (!activeTest || isPreviewMode) { setView('teacher-dash'); return; }
+    
+    // Finalize time for the last question
+    const now = Date.now();
+    const timeSpent = Math.round((now - lastQuestionChangeTime) / 1000);
+    const finalTimePerQuestion = { ...timePerQuestion };
+    const currentQ = activeTest.questions[currentQuestionIndex];
+    finalTimePerQuestion[currentQ.id] = (finalTimePerQuestion[currentQ.id] || 0) + timeSpent;
+
     let correct = 0;
     activeTest.questions.forEach(q => { if (answers[q.id] === q.correctAnswer) correct++; });
     const score = Math.round((correct / activeTest.questions.length) * 100);
     const feedback = await getAIStudyFeedback(score, activeTest.questions.filter(q => answers[q.id] !== q.correctAnswer).map(q => q.text).slice(0,3));
-    const result: TestResult = {
-      id: `r-${Date.now()}`, testId: activeTest.id, testTitle: activeTest.title,
+    
+    const resultData = {
+      testId: activeTest.id, testTitle: activeTest.title,
       studentId: user!.id, studentName: user!.name, score, totalQuestions: activeTest.questions.length,
       correctCount: correct, timestamp: Date.now(), userAnswers: { ...answers },
-      questionsSnapshot: [...activeTest.questions], aiFeedback: feedback
+      questionsSnapshot: [...activeTest.questions], aiFeedback: feedback,
+      timePerQuestion: finalTimePerQuestion,
+      feedbackRead: false
     };
-    setResults([result, ...results]);
-    setActiveResult(result);
-    setView('result-view');
+
+    try {
+      const docRef = await addDoc(collection(db, 'results'), resultData);
+      const result: TestResult = { ...resultData, id: docRef.id };
+      setActiveResult(result);
+      setView('result-view');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'results');
+    }
   };
 
   const getScoreColor = (score: number) => {
     if (score >= 80) return 'text-emerald-500';
     if (score >= 50) return 'text-amber-500';
     return 'text-rose-500';
+  };
+
+  const handleExplain = async (question: Question, userAnswer: string) => {
+    if (explanations[question.id]) return;
+    setIsExplaining(question.id);
+    try {
+      const explanation = await getAIExplanation(question, userAnswer);
+      setExplanations(prev => ({ ...prev, [question.id]: explanation }));
+    } catch (err) {
+      setError('Failed to get explanation.');
+    } finally {
+      setIsExplaining(null);
+    }
+  };
+
+  const handleSaveFeedback = async (resultId: string) => {
+    try {
+      await updateDoc(doc(db, 'results', resultId), { 
+        teacherFeedback: feedbackText,
+        feedbackRead: false 
+      });
+      setFeedbackText("");
+      const updatedResult = results.find(r => r.id === resultId);
+      if (updatedResult) {
+        setActiveResult({ ...updatedResult, teacherFeedback: feedbackText, feedbackRead: false });
+      }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `results/${resultId}`);
+    }
+  };
+
+  const getTestAnalytics = (testId: string) => {
+    const testResults = results.filter(r => r.testId === testId);
+    if (testResults.length === 0) return null;
+
+    const test = tests.find(t => t.id === testId);
+    if (!test) return null;
+
+    const questionStats = test.questions.map(q => {
+      const attempts = testResults.filter(r => r.userAnswers[q.id] !== undefined).length;
+      const correct = testResults.filter(r => r.userAnswers[q.id] === q.correctAnswer).length;
+      const totalTime = testResults.reduce((acc, r) => acc + (r.timePerQuestion?.[q.id] || 0), 0);
+      const avgTime = attempts > 0 ? Math.round(totalTime / attempts) : 0;
+      
+      return {
+        id: q.id,
+        text: q.text,
+        attempts,
+        correct,
+        accuracy: attempts > 0 ? Math.round((correct / attempts) * 100) : 0,
+        avgTime
+      };
+    });
+
+    const avgScore = Math.round(testResults.reduce((acc, r) => acc + r.score, 0) / testResults.length);
+    const mostDifficult = [...questionStats].sort((a, b) => a.accuracy - b.accuracy)[0];
+    const longestTime = [...questionStats].sort((a, b) => b.avgTime - a.avgTime)[0];
+
+    return {
+      avgScore,
+      totalSubmissions: testResults.length,
+      questionStats,
+      mostDifficult,
+      longestTime
+    };
+  };
+  const handleQuestionChange = (newIndex: number) => {
+    if (!activeTest) return;
+    const now = Date.now();
+    const timeSpent = Math.round((now - lastQuestionChangeTime) / 1000);
+    const currentQ = activeTest.questions[currentQuestionIndex];
+    
+    setTimePerQuestion(prev => ({
+      ...prev,
+      [currentQ.id]: (prev[currentQ.id] || 0) + timeSpent
+    }));
+    
+    setLastQuestionChangeTime(now);
+    setCurrentQuestionIndex(newIndex);
   };
 
   const formatTime = (seconds: number) => {
@@ -383,6 +579,12 @@ const App: React.FC = () => {
 
         {user && (
           <div className="flex items-center gap-4">
+            {user.role === 'student' && notifications.length > 0 && (
+              <div className="relative">
+                <Bell className="w-5 h-5 text-red-500 animate-pulse" />
+                <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full" />
+              </div>
+            )}
             <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-full border border-white/10">
               <UserIcon className="w-4 h-4 text-red-500" />
               <span className="text-sm font-medium">{user.name}</span>
@@ -391,7 +593,7 @@ const App: React.FC = () => {
               </span>
             </div>
             <button 
-              onClick={() => { setUser(null); setView('home'); }}
+              onClick={() => signOut(auth)}
               className="p-2 hover:bg-white/10 rounded-full transition-colors text-red-500"
               title="Logout"
             >
@@ -467,31 +669,27 @@ const App: React.FC = () => {
               exit="exit"
               className="max-w-md mx-auto"
             >
-              <div className="q-card p-8">
+              <div className="q-card p-8 text-center">
                 <button onClick={() => setView('home')} className="mb-6 flex items-center gap-2 text-zinc-500 hover:text-white transition-colors">
                   <ArrowLeft className="w-4 h-4" /> Back
                 </button>
-                <h2 className="text-3xl font-bold mb-2">Welcome Back</h2>
-                <p className="text-zinc-500 mb-8">Enter your details to access the {role} dashboard.</p>
+                <div className="w-16 h-16 bg-red-600/10 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                  {role === 'teacher' ? <GraduationCap className="w-8 h-8 text-red-500" /> : <BookOpen className="w-8 h-8 text-red-500" />}
+                </div>
+                <h2 className="text-3xl font-bold mb-2">Welcome {role === 'teacher' ? 'Teacher' : 'Student'}</h2>
+                <p className="text-zinc-500 mb-8">Sign in with your Google account to access your dashboard.</p>
                 
                 <form onSubmit={handleLogin} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Full Name</label>
-                    <input required name="name" type="text" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="John Doe" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">{role === 'teacher' ? 'Teacher ID' : 'Student ID'}</label>
-                    <input required name="id" type="text" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="ID-12345" />
-                  </div>
                   {role === 'teacher' && (
-                    <div>
-                      <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Access Key</label>
+                    <div className="text-left">
+                      <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Teacher Access Key</label>
                       <input required name="password" type="password" className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors" placeholder="••••" />
                     </div>
                   )}
-                  {error && <p className="text-red-500 text-sm font-medium">{error}</p>}
-                  <button type="submit" className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-red-600/20 mt-4">
-                    Continue to Dashboard
+                  {error && <p className="text-red-500 text-sm font-medium mb-4">{error}</p>}
+                  <button type="submit" className="w-full bg-white text-black font-bold py-4 rounded-xl transition-all shadow-lg hover:bg-zinc-200 flex items-center justify-center gap-3">
+                    <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
+                    Sign in with Google
                   </button>
                 </form>
               </div>
@@ -537,6 +735,9 @@ const App: React.FC = () => {
                           <div className="flex justify-between items-start mb-4">
                             <h4 className="font-bold text-lg line-clamp-1">{test.title}</h4>
                             <div className="flex gap-2">
+                              <button onClick={() => setShowAnalytics(test.id)} className="p-2 hover:bg-white/5 rounded-lg text-zinc-400 hover:text-red-500" title="Analytics">
+                                <BarChart3 className="w-4 h-4" />
+                              </button>
                               <button onClick={() => startTest(test, true)} className="p-2 hover:bg-white/5 rounded-lg text-zinc-400 hover:text-white" title="Preview">
                                 <Eye className="w-4 h-4" />
                               </button>
@@ -616,21 +817,32 @@ const App: React.FC = () => {
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {tests.map(test => (
-                        <div key={test.id} className="q-card p-6 group hover:border-red-500/50 transition-all">
-                          <h4 className="font-bold text-lg mb-2">{test.title}</h4>
-                          <div className="flex items-center gap-4 text-sm text-zinc-500 mb-6">
-                            <span className="flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> {test.timerMinutes}m</span>
-                            <span className="flex items-center gap-1"><BookOpen className="w-3.5 h-3.5" /> {test.questions.length} Qs</span>
+                      {tests.map(test => {
+                        const hasTaken = results.some(r => r.testId === test.id && r.studentId === user?.id);
+                        return (
+                          <div key={test.id} className="q-card p-6 group hover:border-red-500/50 transition-all">
+                            <div className="flex justify-between items-start mb-2">
+                              <h4 className="font-bold text-lg">{test.title}</h4>
+                              {hasTaken && <Lock className="w-4 h-4 text-zinc-600" />}
+                            </div>
+                            <div className="flex items-center gap-4 text-sm text-zinc-500 mb-6">
+                              <span className="flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> {test.timerMinutes}m</span>
+                              <span className="flex items-center gap-1"><BookOpen className="w-3.5 h-3.5" /> {test.questions.length} Qs</span>
+                            </div>
+                            <button 
+                              onClick={() => startTest(test)}
+                              className={cn(
+                                "w-full font-bold py-2.5 rounded-lg transition-all flex items-center justify-center gap-2",
+                                hasTaken 
+                                  ? "bg-zinc-800 text-zinc-500 cursor-default" 
+                                  : "bg-white text-black hover:bg-red-600 hover:text-white"
+                              )}
+                            >
+                              {hasTaken ? 'Test Completed' : 'Start Test'} {!hasTaken && <ChevronRight className="w-4 h-4" />}
+                            </button>
                           </div>
-                          <button 
-                            onClick={() => startTest(test)}
-                            className="w-full bg-white text-black font-bold py-2.5 rounded-lg hover:bg-red-600 hover:text-white transition-all flex items-center justify-center gap-2"
-                          >
-                            Start Test <ChevronRight className="w-4 h-4" />
-                          </button>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -645,9 +857,28 @@ const App: React.FC = () => {
                     ) : (
                       <div className="space-y-4">
                         {results.filter(r => r.studentId === user?.id).slice(0, 5).map(res => (
-                          <div key={res.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                          <div 
+                            key={res.id} 
+                            className="flex items-center justify-between p-3 bg-white/5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer relative"
+                            onClick={async () => {
+                              if (res.teacherFeedback && !res.feedbackRead) {
+                                try {
+                                  await updateDoc(doc(db, 'results', res.id), { feedbackRead: true });
+                                } catch (err) {
+                                  console.error("Failed to mark feedback as read", err);
+                                }
+                              }
+                              setActiveResult(res);
+                              setView('result-view');
+                            }}
+                          >
                             <div className="min-w-0">
-                              <p className="font-bold text-sm truncate">{res.testTitle}</p>
+                              <div className="flex items-center gap-2">
+                                <p className="font-bold text-sm truncate">{res.testTitle}</p>
+                                {res.teacherFeedback && !res.feedbackRead && (
+                                  <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                                )}
+                              </div>
                               <p className="text-[10px] text-zinc-500 uppercase tracking-wider">{new Date(res.timestamp).toLocaleDateString()}</p>
                             </div>
                             <span className={cn("font-black text-lg", getScoreColor(res.score))}>{res.score}%</span>
@@ -985,9 +1216,14 @@ const App: React.FC = () => {
               className="max-w-4xl mx-auto"
             >
               <div className="sticky top-20 z-40 bg-black/80 backdrop-blur-md p-4 mb-8 rounded-xl border border-white/10 flex items-center justify-between">
-                <div>
-                  <h2 className="font-bold text-lg">{activeTest.title}</h2>
-                  <p className="text-xs text-zinc-500">{activeTest.questions.length} Questions</p>
+                <div className="flex items-center gap-4">
+                  <div className="w-10 h-10 bg-red-600/20 rounded-lg flex items-center justify-center font-bold text-red-500">
+                    {currentQuestionIndex + 1}
+                  </div>
+                  <div>
+                    <h2 className="font-bold text-lg leading-tight">{activeTest.title}</h2>
+                    <p className="text-xs text-zinc-500">Question {currentQuestionIndex + 1} of {activeTest.questions.length}</p>
+                  </div>
                 </div>
                 {!isPreviewMode && (
                   <div className={cn(
@@ -1004,57 +1240,93 @@ const App: React.FC = () => {
               </div>
 
               <div className="space-y-8">
-                {activeTest.questions.map((q, idx) => (
-                  <div key={q.id} className="q-card p-8">
-                    <div className="flex gap-4 mb-6">
-                      <span className="flex-shrink-0 w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center font-bold text-zinc-500">{idx + 1}</span>
-                      <h3 className="text-xl font-medium leading-relaxed">{q.text}</h3>
-                    </div>
+                <div className="q-card p-8 min-h-[400px] flex flex-col">
+                  <div className="flex-grow">
+                    <h3 className="text-2xl font-medium leading-relaxed mb-8">
+                      {activeTest.questions[currentQuestionIndex].text}
+                    </h3>
                     
-                    {q.type === QuestionType.MULTIPLE_CHOICE ? (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 ml-12">
-                        {q.options?.map(opt => (
+                    {activeTest.questions[currentQuestionIndex].type === QuestionType.MULTIPLE_CHOICE ? (
+                      <div className="grid grid-cols-1 gap-3">
+                        {activeTest.questions[currentQuestionIndex].options?.map(opt => (
                           <button
                             key={opt.label}
-                            onClick={() => setAnswers({ ...answers, [q.id]: opt.label })}
+                            onClick={() => setAnswers({ ...answers, [activeTest.questions[currentQuestionIndex].id]: opt.label })}
                             className={cn(
-                              "flex items-center gap-4 p-4 rounded-xl border transition-all text-left",
-                              answers[q.id] === opt.label 
+                              "flex items-center gap-4 p-5 rounded-xl border transition-all text-left",
+                              answers[activeTest.questions[currentQuestionIndex].id] === opt.label 
                                 ? "bg-red-600/10 border-red-600 text-white" 
                                 : "bg-white/5 border-white/5 text-zinc-400 hover:border-white/20 hover:bg-white/10"
                             )}
                           >
                             <span className={cn(
-                              "w-6 h-6 rounded flex items-center justify-center text-xs font-bold",
-                              answers[q.id] === opt.label ? "bg-red-600 text-white" : "bg-white/10 text-zinc-500"
+                              "w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold",
+                              answers[activeTest.questions[currentQuestionIndex].id] === opt.label ? "bg-red-600 text-white" : "bg-white/10 text-zinc-500"
                             )}>
                               {opt.label}
                             </span>
-                            <span className="font-medium">{opt.text}</span>
+                            <span className="font-medium text-lg">{opt.text}</span>
                           </button>
                         ))}
                       </div>
                     ) : (
-                      <div className="ml-12">
+                      <div className="mt-4">
                         <input 
                           type="text"
-                          value={answers[q.id] || ''}
-                          onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
-                          className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 focus:border-red-500 outline-none transition-colors"
+                          value={answers[activeTest.questions[currentQuestionIndex].id] || ''}
+                          onChange={(e) => setAnswers({ ...answers, [activeTest.questions[currentQuestionIndex].id]: e.target.value })}
+                          className="w-full bg-black border border-white/10 rounded-xl px-6 py-4 text-xl focus:border-red-500 outline-none transition-colors"
                           placeholder="Type your answer here..."
+                          autoFocus
                         />
                       </div>
                     )}
                   </div>
-                ))}
 
-                <div className="pt-8 flex justify-center">
-                  <button 
-                    onClick={handleTestSubmit}
-                    className="bg-red-600 hover:bg-red-500 text-white font-bold px-12 py-4 rounded-xl transition-all shadow-xl shadow-red-600/20"
-                  >
-                    {isPreviewMode ? 'Close Preview' : 'Submit Test'}
-                  </button>
+                  <div className="mt-12 flex items-center justify-between pt-8 border-t border-white/5">
+                    <button
+                      disabled={currentQuestionIndex === 0}
+                      onClick={() => handleQuestionChange(currentQuestionIndex - 1)}
+                      className="px-6 py-3 rounded-xl font-bold text-zinc-400 hover:text-white hover:bg-white/5 transition-all disabled:opacity-0"
+                    >
+                      Previous
+                    </button>
+                    
+                    {currentQuestionIndex === activeTest.questions.length - 1 ? (
+                      <button 
+                        onClick={handleTestSubmit}
+                        className="bg-red-600 hover:bg-red-500 text-white font-bold px-10 py-3 rounded-xl transition-all shadow-xl shadow-red-600/20"
+                      >
+                        {isPreviewMode ? 'Close Preview' : 'Submit Test'}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => handleQuestionChange(currentQuestionIndex + 1)}
+                        className="bg-white text-black hover:bg-zinc-200 font-bold px-10 py-3 rounded-xl transition-all"
+                      >
+                        Next Question
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap justify-center gap-2">
+                  {activeTest.questions.map((_, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => handleQuestionChange(idx)}
+                      className={cn(
+                        "w-10 h-10 rounded-lg font-bold text-xs transition-all border",
+                        currentQuestionIndex === idx 
+                          ? "bg-red-600 border-red-600 text-white scale-110 shadow-lg shadow-red-600/20" 
+                          : answers[activeTest.questions[idx].id]
+                            ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-500"
+                            : "bg-white/5 border-white/10 text-zinc-500 hover:border-white/30"
+                      )}
+                    >
+                      {idx + 1}
+                    </button>
+                  ))}
                 </div>
               </div>
             </motion.div>
@@ -1104,11 +1376,39 @@ const App: React.FC = () => {
                 </div>
 
                 {activeResult.aiFeedback && (
-                  <div className="bg-red-600/5 border border-red-600/20 rounded-2xl p-8 text-left mb-12">
+                  <div className="bg-red-600/5 border border-red-600/20 rounded-2xl p-8 text-left mb-8">
                     <h3 className="flex items-center gap-2 font-bold text-red-500 mb-4">
                       <BrainCircuit className="w-5 h-5" /> AI Study Insight
                     </h3>
                     <p className="text-zinc-300 leading-relaxed italic">"{activeResult.aiFeedback}"</p>
+                  </div>
+                )}
+
+                {activeResult.teacherFeedback && (
+                  <div className="bg-emerald-600/5 border border-emerald-600/20 rounded-2xl p-8 text-left mb-8">
+                    <h3 className="flex items-center gap-2 font-bold text-emerald-500 mb-4">
+                      <GraduationCap className="w-5 h-5" /> Teacher's Advice
+                    </h3>
+                    <p className="text-zinc-300 leading-relaxed">"{activeResult.teacherFeedback}"</p>
+                  </div>
+                )}
+
+                {user?.role === 'teacher' && (
+                  <div className="q-card p-8 text-left mb-8">
+                    <h3 className="font-bold mb-4">Provide Feedback to Student</h3>
+                    <textarea
+                      value={feedbackText}
+                      onChange={(e) => setFeedbackText(e.target.value)}
+                      className="w-full bg-black border border-white/10 rounded-xl p-4 mb-4 focus:border-red-500 outline-none transition-colors"
+                      placeholder="Write your advice here..."
+                      rows={3}
+                    />
+                    <button
+                      onClick={() => handleSaveFeedback(activeResult.id)}
+                      className="bg-red-600 hover:bg-red-500 text-white font-bold px-6 py-2 rounded-lg transition-all"
+                    >
+                      Save Feedback
+                    </button>
                   </div>
                 )}
 
@@ -1132,38 +1432,87 @@ const App: React.FC = () => {
                 <h3 className="text-xl font-bold px-4">Review Answers</h3>
                 {activeResult.questionsSnapshot.map((q, idx) => (
                   <div key={q.id} className="q-card p-8">
-                    <div className="flex gap-4 mb-6">
-                      <span className="flex-shrink-0 w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center font-bold text-zinc-500">{idx + 1}</span>
-                      <h3 className="text-xl font-medium leading-relaxed">{q.text}</h3>
+                    <div className="flex justify-between items-start mb-6">
+                      <div className="flex gap-4">
+                        <span className="flex-shrink-0 w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center font-bold text-zinc-500">{idx + 1}</span>
+                        <h3 className="text-xl font-medium leading-relaxed">{q.text}</h3>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs text-zinc-500 bg-white/5 px-3 py-1 rounded-full">
+                        <Clock className="w-3 h-3" /> {activeResult.timePerQuestion?.[q.id] || 0}s
+                      </div>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 ml-12">
-                      {q.options.map(opt => {
-                        const isUserAnswer = activeResult.userAnswers[q.id] === opt.label;
-                        const isCorrect = q.correctAnswer === opt.label;
-                        return (
-                          <div
-                            key={opt.label}
-                            className={cn(
-                              "flex items-center gap-4 p-4 rounded-xl border transition-all",
-                              isCorrect ? "bg-emerald-500/10 border-emerald-500 text-emerald-500" :
-                              isUserAnswer ? "bg-rose-500/10 border-rose-500 text-rose-500" :
-                              "bg-white/5 border-white/5 text-zinc-500"
-                            )}
-                          >
-                            <span className={cn(
-                              "w-6 h-6 rounded flex items-center justify-center text-xs font-bold",
-                              isCorrect ? "bg-emerald-500 text-white" :
-                              isUserAnswer ? "bg-rose-500 text-white" :
-                              "bg-white/10 text-zinc-600"
-                            )}>
-                              {opt.label}
-                            </span>
-                            <span className="font-medium">{opt.text}</span>
-                            {isCorrect && <CheckCircle2 className="w-4 h-4 ml-auto" />}
-                            {isUserAnswer && !isCorrect && <XCircle className="w-4 h-4 ml-auto" />}
+
+                    {q.type === QuestionType.MULTIPLE_CHOICE ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 ml-12 mb-6">
+                        {q.options?.map(opt => {
+                          const isUserAnswer = activeResult.userAnswers[q.id] === opt.label;
+                          const isCorrect = q.correctAnswer === opt.label;
+                          return (
+                            <div
+                              key={opt.label}
+                              className={cn(
+                                "flex items-center gap-4 p-4 rounded-xl border transition-all",
+                                isCorrect ? "bg-emerald-500/10 border-emerald-500 text-emerald-500" :
+                                isUserAnswer ? "bg-rose-500/10 border-rose-500 text-rose-500" :
+                                "bg-white/5 border-white/5 text-zinc-500"
+                              )}
+                            >
+                              <span className={cn(
+                                "w-6 h-6 rounded flex items-center justify-center text-xs font-bold",
+                                isCorrect ? "bg-emerald-500 text-white" :
+                                isUserAnswer ? "bg-rose-500 text-white" :
+                                "bg-white/10 text-zinc-600"
+                              )}>
+                                {opt.label}
+                              </span>
+                              <span className="font-medium">{opt.text}</span>
+                              {isCorrect && <CheckCircle2 className="w-4 h-4 ml-auto" />}
+                              {isUserAnswer && !isCorrect && <XCircle className="w-4 h-4 ml-auto" />}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="ml-12 mb-6 space-y-3">
+                        <div className={cn(
+                          "p-4 rounded-xl border flex items-center justify-between",
+                          activeResult.userAnswers[q.id] === q.correctAnswer 
+                            ? "bg-emerald-500/10 border-emerald-500 text-emerald-500" 
+                            : "bg-rose-500/10 border-rose-500 text-rose-500"
+                        )}>
+                          <div>
+                            <p className="text-xs opacity-50 mb-1">Your Answer</p>
+                            <p className="font-bold">{activeResult.userAnswers[q.id] || '(No Answer)'}</p>
                           </div>
-                        );
-                      })}
+                          {activeResult.userAnswers[q.id] === q.correctAnswer ? <CheckCircle2 className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
+                        </div>
+                        {activeResult.userAnswers[q.id] !== q.correctAnswer && (
+                          <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/5 text-emerald-500">
+                            <p className="text-xs opacity-50 mb-1">Correct Answer</p>
+                            <p className="font-bold">{q.correctAnswer}</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="ml-12">
+                      {explanations[q.id] ? (
+                        <div className="bg-white/5 rounded-xl p-6 border border-white/10">
+                          <p className="text-sm text-zinc-400 leading-relaxed italic">
+                            <span className="text-red-500 font-bold not-italic mr-2">AI Explanation:</span>
+                            {explanations[q.id]}
+                          </p>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => handleExplain(q, activeResult.userAnswers[q.id] || '')}
+                          disabled={isExplaining === q.id}
+                          className="flex items-center gap-2 text-xs font-bold text-red-500 hover:text-red-400 transition-colors disabled:opacity-50"
+                        >
+                          {isExplaining === q.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <BrainCircuit className="w-3 h-3" />}
+                          Explain this question
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -1211,6 +1560,88 @@ const App: React.FC = () => {
                 </div>
               </motion.div>
             </motion.div>
+          )}
+
+          {showAnalytics && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="bg-zinc-900 border border-white/10 rounded-3xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col"
+              >
+                <div className="p-6 border-b border-white/5 flex items-center justify-between bg-white/5">
+                  <div>
+                    <h3 className="text-2xl font-bold">Test Analytics</h3>
+                    <p className="text-sm text-zinc-500">{tests.find(t => t.id === showAnalytics)?.title}</p>
+                  </div>
+                  <button onClick={() => setShowAnalytics(null)} className="p-2 hover:bg-white/10 rounded-full transition-colors">
+                    <X className="w-6 h-6" />
+                  </button>
+                </div>
+
+                <div className="flex-grow overflow-y-auto p-8">
+                  {(() => {
+                    const stats = getTestAnalytics(showAnalytics);
+                    if (!stats) return <p className="text-center text-zinc-500 py-12">No data available for this test yet.</p>;
+
+                    return (
+                      <div className="space-y-12">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                          <div className="q-card p-6 bg-white/5 border-white/10">
+                            <p className="text-xs text-zinc-500 uppercase tracking-widest font-bold mb-2">Avg. Score</p>
+                            <p className={cn("text-3xl font-black", getScoreColor(stats.avgScore))}>{stats.avgScore}%</p>
+                          </div>
+                          <div className="q-card p-6 bg-white/5 border-white/10">
+                            <p className="text-xs text-zinc-500 uppercase tracking-widest font-bold mb-2">Submissions</p>
+                            <p className="text-3xl font-black text-white">{stats.totalSubmissions}</p>
+                          </div>
+                          <div className="q-card p-6 bg-white/5 border-white/10">
+                            <p className="text-xs text-zinc-500 uppercase tracking-widest font-bold mb-2">Most Difficult</p>
+                            <p className="text-sm font-bold text-rose-500 line-clamp-2">{stats.mostDifficult.text}</p>
+                            <p className="text-xs text-zinc-500 mt-1">{stats.mostDifficult.accuracy}% Accuracy</p>
+                          </div>
+                          <div className="q-card p-6 bg-white/5 border-white/10">
+                            <p className="text-xs text-zinc-500 uppercase tracking-widest font-bold mb-2">Longest Time</p>
+                            <p className="text-sm font-bold text-amber-500 line-clamp-2">{stats.longestTime.text}</p>
+                            <p className="text-xs text-zinc-500 mt-1">{stats.longestTime.avgTime}s Average</p>
+                          </div>
+                        </div>
+
+                        <div className="space-y-6">
+                          <h4 className="text-xl font-bold flex items-center gap-2">
+                            <BarChart3 className="w-5 h-5 text-red-500" /> Question Performance
+                          </h4>
+                          <div className="space-y-4">
+                            {stats.questionStats.map((q, idx) => (
+                              <div key={q.id} className="q-card p-6 bg-white/5 border-white/5 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                                <div className="flex gap-4 min-w-0">
+                                  <span className="flex-shrink-0 w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center font-bold text-zinc-500">{idx + 1}</span>
+                                  <p className="font-medium text-zinc-300 line-clamp-2">{q.text}</p>
+                                </div>
+                                <div className="flex items-center gap-8 flex-shrink-0">
+                                  <div className="text-center">
+                                    <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold mb-1">Accuracy</p>
+                                    <p className={cn("font-black", getScoreColor(q.accuracy))}>{q.accuracy}%</p>
+                                  </div>
+                                  <div className="text-center">
+                                    <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold mb-1">Avg Time</p>
+                                    <p className="font-black text-white">{q.avgTime}s</p>
+                                  </div>
+                                  <div className="text-center">
+                                    <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold mb-1">Attempts</p>
+                                    <p className="font-black text-white">{q.attempts}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              </motion.div>
+            </div>
           )}
         </AnimatePresence>
       </main>
