@@ -301,9 +301,19 @@ const App: React.FC = () => {
   const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const name = formData.get('name') as string;
-    const id = formData.get('id') as string;
+    const name = (formData.get('name') as string || '').trim();
+    const id = (formData.get('id') as string || '').trim();
     const password = formData.get('password') as string;
+
+    if (!role) {
+      setError('Please select a role first.');
+      return;
+    }
+
+    if (!name || !id) {
+      setError('Name and ID are required.');
+      return;
+    }
 
     try {
       const userDocRef = doc(db, 'users', id);
@@ -316,12 +326,17 @@ const App: React.FC = () => {
           setError('Incorrect Teacher Password for new account.');
           return;
         }
+        
         userData = {
           id,
           name,
-          role: role!,
-          password: role === 'teacher' ? password : undefined
+          role: role,
         };
+        
+        if (role === 'teacher') {
+          userData.password = password;
+        }
+
         await setDoc(userDocRef, userData);
       } else {
         userData = userDoc.data() as User;
@@ -342,8 +357,12 @@ const App: React.FC = () => {
       setError(null);
       setView(userData.role === 'teacher' ? 'teacher-dash' : 'student-dash');
     } catch (err) {
-      setError('Login failed. Please try again.');
-      console.error(err);
+      console.error('Login error:', err);
+      if (err instanceof Error) {
+        setError(`Login failed: ${err.message}`);
+      } else {
+        setError('Login failed. Please try again.');
+      }
     }
   };
 
