@@ -54,4 +54,4 @@ export enum Theme {
   DARK = 'dark'
 }
 
-export type ViewState = 'home' | 'login' | 'teacher-dash' | 'student-dash' | 'test-creator' | 'test-taking' | 'result-view' | 'review-detail';
+export type ViewState = 'home' | 'login' | 'teacher-dash' | 'student-dash' | 'test-creator' | 'test-taking' | 'result-view' | 'review-detail' | 'student-detail';

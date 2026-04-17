@@ -23,7 +23,8 @@ import {
   Menu,
   X,
   Lock,
-  Bell
+  Bell,
+  Users
 } from 'lucide-react';
 import { Question, Theme, ViewState, User, Test, TestResult, QuestionType } from './types';
 import { generateQuestionsWithGemini, getAIStudyFeedback, expandQuestionsWithGemini, getAIExplanation } from './services/geminiService';
@@ -85,6 +86,22 @@ const App: React.FC = () => {
   const [notifications, setNotifications] = useState<TestResult[]>([]);
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [newPassword, setNewPassword] = useState("");
+  const [activeStudentId, setActiveStudentId] = useState<string | null>(null);
+
+  const studentStats = useMemo(() => {
+    const stats: Record<string, { id: string, name: string, testCount: number, avgScore: number }> = {};
+    results.forEach(r => {
+      if (!stats[r.studentId]) {
+        stats[r.studentId] = { id: r.studentId, name: r.studentName, testCount: 0, avgScore: 0 };
+      }
+      stats[r.studentId].testCount++;
+      stats[r.studentId].avgScore += r.score;
+    });
+    return Object.values(stats).map(s => ({
+      ...s,
+      avgScore: Math.round(s.avgScore / s.testCount)
+    })).sort((a, b) => b.testCount - a.testCount);
+  }, [results]);
 
   const addManualQuestion = () => {
     setManualQuestions([...manualQuestions, {
@@ -892,6 +909,118 @@ const App: React.FC = () => {
                   </div>
                 </div>
               </div>
+
+              <div className="mt-12 space-y-6">
+                <h3 className="text-xl font-bold flex items-center gap-2">
+                  <Users className="w-5 h-5 text-red-500" /> Student Directory
+                </h3>
+                <div className="q-card overflow-hidden">
+                  {studentStats.length === 0 ? (
+                    <div className="p-8 text-center">
+                      <p className="text-zinc-500 text-sm">No students have taken any tests yet.</p>
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-white/5">
+                      {studentStats.map(student => (
+                        <div 
+                          key={student.id} 
+                          className="p-4 hover:bg-white/5 transition-colors cursor-pointer flex items-center justify-between"
+                          onClick={() => { setActiveStudentId(student.id); setView('student-detail'); }}
+                        >
+                          <div>
+                            <p className="font-bold text-lg">{student.name}</p>
+                            <p className="text-xs text-zinc-500">ID: {student.id}</p>
+                          </div>
+                          <div className="flex items-center gap-8 text-sm">
+                            <div className="text-center">
+                              <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold mb-1">Tests</p>
+                              <p className="font-bold text-lg">{student.testCount}</p>
+                            </div>
+                            <div className="text-center">
+                              <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold mb-1">Avg Score</p>
+                              <p className={cn("font-bold text-lg", getScoreColor(student.avgScore))}>{student.avgScore}%</p>
+                            </div>
+                            <ChevronRight className="w-5 h-5 text-zinc-600" />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {view === 'student-detail' && activeStudentId && (
+            <motion.div 
+              key="student-detail"
+              variants={pageVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="space-y-8"
+            >
+              {(() => {
+                const studentResults = results.filter(r => r.studentId === activeStudentId).sort((a, b) => b.timestamp - a.timestamp);
+                const studentName = studentResults[0]?.studentName || 'Unknown Student';
+                const avgScore = Math.round(studentResults.reduce((acc, r) => acc + r.score, 0) / studentResults.length) || 0;
+
+                return (
+                  <>
+                    <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                      <div>
+                        <button onClick={() => setView('teacher-dash')} className="mb-4 flex items-center gap-2 text-zinc-500 hover:text-white transition-colors">
+                          <ArrowLeft className="w-4 h-4" /> Back to Dashboard
+                        </button>
+                        <h2 className="text-4xl font-black tracking-tight">{studentName}</h2>
+                        <p className="text-zinc-500 mt-1">ID: {activeStudentId}</p>
+                      </div>
+                      <div className="flex gap-4">
+                        <div className="q-card px-6 py-4 text-center min-w-[120px]">
+                          <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold mb-1">Total Tests</p>
+                          <p className="text-3xl font-black">{studentResults.length}</p>
+                        </div>
+                        <div className="q-card px-6 py-4 text-center min-w-[120px]">
+                          <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold mb-1">Avg Score</p>
+                          <p className={cn("text-3xl font-black", getScoreColor(avgScore))}>{avgScore}%</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-6">
+                      <h3 className="text-xl font-bold flex items-center gap-2">
+                        <FileText className="w-5 h-5 text-red-500" /> Test History
+                      </h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {studentResults.map(res => (
+                          <div 
+                            key={res.id} 
+                            className="q-card p-6 group hover:border-red-500/50 transition-all cursor-pointer"
+                            onClick={() => { setActiveResult(res); setView('result-view'); }}
+                          >
+                            <div className="flex justify-between items-start mb-4">
+                              <div>
+                                <h4 className="font-bold text-lg line-clamp-1">{res.testTitle}</h4>
+                                <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold mt-1">
+                                  {new Date(res.timestamp).toLocaleDateString()}
+                                </p>
+                              </div>
+                              <span className={cn("font-black text-2xl", getScoreColor(res.score))}>{res.score}%</span>
+                            </div>
+                            <div className="flex items-center justify-between pt-4 border-t border-white/5">
+                              <div className="flex gap-4 text-sm font-medium">
+                                <span className="text-emerald-500">{res.correctCount} Correct</span>
+                                <span className="text-rose-500">{res.totalQuestions - res.correctCount} Incorrect</span>
+                              </div>
+                              <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-white transition-colors" />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
             </motion.div>
           )}
 
